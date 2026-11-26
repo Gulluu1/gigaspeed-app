@@ -47,18 +47,20 @@ export function getRating(downloadMbps: number): string {
   return "Slow";
 }
 
-export async function measurePing(): Promise<PingResult> {
+export async function measurePing(signal?: AbortSignal): Promise<PingResult> {
   const url = "https://speed.cloudflare.com/__down?bytes=0";
   const samples: number[] = [];
   const maxAttempts = 5;
 
   for (let i = 0; i < maxAttempts; i++) {
+    if (signal?.aborted) throw new Error("Test cancelled");
     const start = performance.now();
     try {
       const response = await fetch(url, {
         method: "GET",
         cache: "no-store",
         mode: "cors",
+        signal,
       });
 
       if (!response.ok) {
@@ -70,8 +72,12 @@ export async function measurePing(): Promise<PingResult> {
       const end = performance.now();
       samples.push(end - start);
     } catch (error) {
+      if (signal?.aborted) throw new Error("Test cancelled");
       if (error instanceof TypeError && error.message.includes("fetch")) {
         throw new Error("Internet se connect nahi ho pa raha. Wi-Fi/data check karke dobara try karo.");
+      }
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw new Error("Test cancelled");
       }
       throw new Error(`Ping measurement failed: ${error instanceof Error ? error.message : "Unknown error"}`);
     }
@@ -97,7 +103,7 @@ export async function measurePing(): Promise<PingResult> {
   return { ping, jitter };
 }
 
-export async function measureDownload(onProgress: (mbps: number) => void): Promise<number> {
+export async function measureDownload(onProgress: (mbps: number) => void, signal?: AbortSignal): Promise<number> {
   const url = "https://speed.cloudflare.com/__down?bytes=25000000";
   const minDurationMs = 5000; // Minimum 5 seconds for accurate measurement
   const progressIntervalMs = 200; // Report progress every 200ms
@@ -113,10 +119,15 @@ export async function measureDownload(onProgress: (mbps: number) => void): Promi
         method: "GET",
         cache: "no-store",
         mode: "cors",
+        signal,
       });
     } catch (error) {
+      if (signal?.aborted) throw new Error("Test cancelled");
       if (error instanceof TypeError && error.message.includes("fetch")) {
         throw new Error("Internet se connect nahi ho pa raha. Wi-Fi/data check karke dobara try karo.");
+      }
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw new Error("Test cancelled");
       }
       throw error;
     }
@@ -133,6 +144,7 @@ export async function measureDownload(onProgress: (mbps: number) => void): Promi
     const chunks: Uint8Array[] = [];
 
     while (true) {
+      if (signal?.aborted) throw new Error("Test cancelled");
       const { done, value } = await reader.read();
       if (done) break;
 
@@ -164,6 +176,7 @@ export async function measureDownload(onProgress: (mbps: number) => void): Promi
 
   // If completed too fast (< 2s), repeat until we reach minimum duration
   while (totalElapsedMs < minDurationMs) {
+    if (signal?.aborted) throw new Error("Test cancelled");
     const additionalMbps = await runDownload();
     // Weighted average favoring the latest measurement
     finalMbps = (finalMbps + additionalMbps) / 2;
@@ -172,7 +185,7 @@ export async function measureDownload(onProgress: (mbps: number) => void): Promi
   return finalMbps;
 }
 
-export async function measureUpload(onProgress: (mbps: number) => void): Promise<number> {
+export async function measureUpload(onProgress: (mbps: number) => void, signal?: AbortSignal): Promise<number> {
   const url = "https://speed.cloudflare.com/__up";
   const minDurationMs = 5000; // Minimum 5 seconds for accurate measurement
   const progressIntervalMs = 200; // Report progress every 200ms
@@ -190,6 +203,17 @@ export async function measureUpload(onProgress: (mbps: number) => void): Promise
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
 
+      // Handle abort signal
+      const abortHandler = () => {
+        xhr.abort();
+        reject(new Error("Test cancelled"));
+      };
+      if (signal?.aborted) {
+        reject(new Error("Test cancelled"));
+        return;
+      }
+      signal?.addEventListener("abort", abortHandler);
+
       xhr.upload.addEventListener("progress", (event) => {
         if (event.lengthComputable) {
           totalBytes = event.loaded;
@@ -205,6 +229,7 @@ export async function measureUpload(onProgress: (mbps: number) => void): Promise
       });
 
       xhr.addEventListener("load", () => {
+        signal?.removeEventListener("abort", abortHandler);
         if (xhr.status >= 200 && xhr.status < 300) {
           const finalElapsedMs = performance.now() - startTime;
           const finalElapsedSec = finalElapsedMs / 1000;
@@ -217,14 +242,17 @@ export async function measureUpload(onProgress: (mbps: number) => void): Promise
       });
 
       xhr.addEventListener("error", () => {
+        signal?.removeEventListener("abort", abortHandler);
         reject(new Error("Internet se connect nahi ho pa raha. Wi-Fi/data check karke dobara try karo."));
       });
 
       xhr.addEventListener("abort", () => {
-        reject(new Error("Upload aborted"));
+        signal?.removeEventListener("abort", abortHandler);
+        reject(new Error("Test cancelled"));
       });
 
       xhr.addEventListener("timeout", () => {
+        signal?.removeEventListener("abort", abortHandler);
         reject(new Error("Upload timeout"));
       });
 
@@ -240,6 +268,7 @@ export async function measureUpload(onProgress: (mbps: number) => void): Promise
 
   // If completed too fast (< 2s), repeat until we reach minimum duration
   while (totalElapsedMs < minDurationMs) {
+    if (signal?.aborted) throw new Error("Test cancelled");
     totalBytes = 0; // Reset for next iteration
     startTime = performance.now();
     lastProgressTime = startTime;

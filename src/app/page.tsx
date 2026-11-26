@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useCallback, useRef } from "react";
 import { measurePing, measureDownload, measureUpload, getHistory, saveHistory, clearHistory, getRating, type HistoryEntry } from "@/lib/speedtest";
+import SpeedometerGauge from "@/components/SpeedometerGauge";
 
 interface SpeedResult {
   download: number | null;
@@ -9,12 +10,15 @@ interface SpeedResult {
   ping: number | null;
 }
 
+type TestStep = "idle" | "ping" | "download" | "upload" | "complete" | "error";
+
 interface TestState {
-  status: "idle" | "testing" | "complete" | "error";
-  currentStep: number;
+  step: TestStep;
   errorMessage: string;
-  failedStep: number | null;
+  serverStatus: string;
 }
+
+const STEP_TIMEOUT = 15000; // 15 seconds per step
 
 export default function Home() {
   const [results, setResults] = useState<SpeedResult>({
@@ -23,39 +27,93 @@ export default function Home() {
     ping: null,
   });
   const [testState, setTestState] = useState<TestState>({
-    status: "idle",
-    currentStep: 0,
+    step: "idle",
     errorMessage: "",
-    failedStep: null,
+    serverStatus: "Server: Cloudflare Speed Test",
   });
-  const [gaugeValue, setGaugeValue] = useState(0);
-  const [graphData, setGraphData] = useState<number[]>([]);
   const [history, setHistory] = useState<HistoryEntry[]>(() => getHistory());
+  const [gaugeSpeed, setGaugeSpeed] = useState(0);
+  const timeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  const clearTimeoutRef = useCallback(() => {
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
+    }
+  }, []);
+
+  const abortCurrentTest = useCallback(() => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    clearTimeoutRef();
+  }, [clearTimeoutRef]);
+
+  const withTimeout = <T,>(promise: Promise<T>, ms: number, signal: AbortSignal): Promise<T> => {
+    return Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error("Step timeout (15s)"));
+        }, ms);
+        signal.addEventListener("abort", () => clearTimeout(timeout));
+      }),
+    ]);
+  };
 
   const handleStartTest = async () => {
-    setTestState({ status: "testing", currentStep: 1, errorMessage: "", failedStep: null });
-    setGaugeValue(0);
-    setGraphData([]);
+    abortCurrentTest();
+    abortControllerRef.current = new AbortController();
+    const signal = abortControllerRef.current.signal;
+
+    setResults({ download: null, upload: null, ping: null });
+    setGaugeSpeed(0);
+    setTestState({
+      step: "ping",
+      errorMessage: "",
+      serverStatus: "Server se connect ho raha hai...",
+    });
 
     try {
-      // Step 1: Ping
-      const pingResult = await measurePing();
+      // Step 1: Ping (fresh measurement every test)
+      const pingResult = await withTimeout(measurePing(signal), STEP_TIMEOUT, signal);
+      if (signal.aborted) return;
+
       setResults((prev) => ({ ...prev, ping: pingResult.ping }));
+      setTestState((prev) => ({ ...prev, serverStatus: "Server: Cloudflare Speed Test" }));
 
       // Step 2: Download
-      setTestState({ status: "testing", currentStep: 2, errorMessage: "", failedStep: null });
-      const downloadMbps = await measureDownload((liveMbps) => {
-        setGaugeValue(liveMbps);
-        setGraphData((prev) => [...prev.slice(-50), liveMbps]); // Keep last 50 points
-      });
+      setTestState((prev) => ({ ...prev, step: "download" }));
+      setGaugeSpeed(0);
+
+      const downloadMbps = await withTimeout(
+        measureDownload((liveMbps) => {
+          if (signal.aborted) return;
+          setGaugeSpeed(liveMbps);
+        }, signal),
+        STEP_TIMEOUT,
+        signal
+      );
+      if (signal.aborted) return;
+
       setResults((prev) => ({ ...prev, download: downloadMbps }));
 
       // Step 3: Upload
-      setTestState({ status: "testing", currentStep: 3, errorMessage: "", failedStep: null });
-      const uploadMbps = await measureUpload((liveMbps) => {
-        setGaugeValue(liveMbps);
-        setGraphData((prev) => [...prev.slice(-50), liveMbps]); // Keep last 50 points
-      });
+      setTestState((prev) => ({ ...prev, step: "upload" }));
+      setGaugeSpeed(0);
+
+      const uploadMbps = await withTimeout(
+        measureUpload((liveMbps) => {
+          if (signal.aborted) return;
+          setGaugeSpeed(liveMbps);
+        }, signal),
+        STEP_TIMEOUT,
+        signal
+      );
+      if (signal.aborted) return;
+
       setResults((prev) => ({ ...prev, upload: uploadMbps }));
 
       // Test complete - save to history
@@ -67,46 +125,33 @@ export default function Home() {
       });
       setHistory(newHistory);
 
-      setTestState({ status: "complete", currentStep: 3, errorMessage: "", failedStep: null });
+      setTestState((prev) => ({ ...prev, step: "complete" }));
     } catch (error) {
+      if (signal.aborted) return;
       const message = error instanceof Error ? error.message : "Test failed";
-      setTestState({ status: "error", currentStep: testState.currentStep, errorMessage: message, failedStep: testState.currentStep });
+      setTestState((prev) => ({
+        ...prev,
+        step: "error",
+        errorMessage: message,
+      }));
     }
   };
 
   const handleRetry = () => {
+    abortCurrentTest();
     setResults({ download: null, upload: null, ping: null });
-    setTestState({ status: "idle", currentStep: 0, errorMessage: "", failedStep: null });
-    setGaugeValue(0);
-    setGraphData([]);
+    setGaugeSpeed(0);
+    setTestState({
+      step: "idle",
+      errorMessage: "",
+      serverStatus: "Server: Cloudflare Speed Test",
+    });
   };
 
   const handleClearHistory = () => {
     clearHistory();
     setHistory([]);
   };
-
-  const getStepText = () => {
-    switch (testState.currentStep) {
-      case 1:
-        return "Step 1/3: Ping measure ho raha hai...";
-      case 2:
-        return "Step 2/3: Download measure ho raha hai...";
-      case 3:
-        return "Step 3/3: Upload measure ho raha hai...";
-      default:
-        return "Test shuru karne ke liye START dabao";
-    }
-  };
-
-  const getButtonText = () => {
-    if (testState.status === "testing") return "Testing...";
-    if (testState.status === "complete") return "Dobara Test Karo";
-    if (testState.status === "error") return "Retry";
-    return "START";
-  };
-
-  const isButtonDisabled = testState.status === "testing";
 
   const formatTimestamp = (timestamp: number): string => {
     const date = new Date(timestamp);
@@ -119,241 +164,209 @@ export default function Home() {
     });
   };
 
+  const getStepLabel = () => {
+    switch (testState.step) {
+      case "download":
+        return "DOWNLOAD Mbps";
+      case "upload":
+        return "UPLOAD Mbps";
+      case "ping":
+        return "MEASURING PING...";
+      default:
+        return "SPEED Mbps";
+    }
+  };
+
+  const getButtonText = () => {
+    if (testState.step === "ping" || testState.step === "download" || testState.step === "upload") return "Testing...";
+    if (testState.step === "complete") return "Dobara Test Karo";
+    if (testState.step === "error") return "Retry";
+    return "START";
+  };
+
+  const isButtonDisabled = testState.step !== "idle" && testState.step !== "complete" && testState.step !== "error";
+
   return (
     <div className="min-h-screen gigaspeed-bg flex flex-col">
       {/* Header */}
-      <header className="py-12 px-4 text-center">
-        <h1 className="gradient-text text-4xl md:text-5xl lg:text-6xl font-bold tracking-tight">
+      <header className="py-8 px-4 text-center">
+        <h1 className="gradient-text text-3xl md:text-4xl lg:text-5xl font-bold tracking-tight">
           GigaSpeed
         </h1>
-        <p className="mt-3 text-lg md:text-xl text-gray-600 dark:text-gray-300 max-w-md mx-auto">
+        <p className="mt-2 text-base md:text-lg text-gray-600 dark:text-gray-300 max-w-md mx-auto">
           Apne internet ki asli speed check karo
         </p>
       </header>
 
       {/* Main Content */}
-      <main className="flex-1 flex flex-col items-center justify-center px-4 py-8">
-        <div className="w-full max-w-4xl">
-          {/* Gauge Section */}
-          <div className="flex flex-col items-center mb-10">
-            <div className="relative w-56 h-56 sm:w-64 sm:h-64 md:w-72 md:h-72 lg:w-80 lg:h-80 xl:w-96 xl:h-96">
-              <svg className="w-full h-full transform -rotate-90" viewBox="0 0 200 200" preserveAspectRatio="xMidYMid meet">
-                {/* Background track */}
-                <circle
-                  cx="100"
-                  cy="100"
-                  r="90"
-                  fill="none"
-                  stroke="#e0e7ff"
-                  strokeWidth="16"
-                />
-                {/* Progress track */}
-                <circle
-                  cx="100"
-                  cy="100"
-                  r="90"
-                  fill="none"
-                  stroke="url(#gaugeGradient)"
-                  strokeWidth="16"
-                  strokeLinecap="round"
-                  strokeDasharray="565.48"
-                  strokeDashoffset={565.48 - (gaugeValue / 1000) * 565.48}
-                  className="gauge-progress"
-                  style={{
-                    transition: "stroke-dashoffset 0.8s ease-out",
-                  }}
-                />
-                <defs>
-                  <linearGradient id="gaugeGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-                    <stop offset="0%" stopColor="#8b5cf6" />
-                    <stop offset="50%" stopColor="#d946ef" />
-                    <stop offset="100%" stopColor="#ec4899" />
-                  </linearGradient>
-                </defs>
-              </svg>
-              {/* Center value */}
-              <div className="absolute inset-0 flex flex-col items-center justify-center">
-                <span className="text-4xl md:text-5xl lg:text-6xl font-bold text-gray-900 dark:text-white">
-                  {gaugeValue > 0 ? gaugeValue.toFixed(1) : "—"}
-                </span>
-                <span className="text-sm md:text-base text-gray-500 dark:text-gray-400 mt-1">
-                  Mbps
+      <main className="flex-1 flex flex-col items-center justify-start px-4 py-6">
+        <div className="w-full max-w-4xl flex flex-col items-center gap-6">
+
+          {/* Top Metrics Row */}
+          <div className="w-full grid grid-cols-3 gap-3 sm:gap-4">
+            {/* Ping Card */}
+            <div className={`bg-white/80 dark:bg-gray-900/80 backdrop-blur-sm rounded-2xl p-4 shadow-lg border-2 transition-all duration-300 ${
+              testState.step === "ping" ? "border-amber-400 shadow-amber-500/20" : "border-gray-100 dark:border-gray-800"
+            }`}>
+              <div className="flex items-center gap-2 mb-2">
+                <div className="w-2.5 h-2.5 rounded-full bg-amber-500" />
+                <span className="text-xs font-medium text-gray-600 dark:text-gray-300 uppercase tracking-wider">
+                  PING
                 </span>
               </div>
+              <div className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white tabular-nums">
+                {results.ping !== null ? results.ping.toFixed(0) : "—"}
+              </div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">ms</div>
+            </div>
+
+            {/* Download Card */}
+            <div className={`bg-white/80 dark:bg-gray-900/80 backdrop-blur-sm rounded-2xl p-4 shadow-lg border-2 transition-all duration-300 ${
+              testState.step === "download" ? "border-sky-400 shadow-sky-500/20" : "border-gray-100 dark:border-gray-800"
+            }`}>
+              <div className="flex items-center gap-2 mb-2">
+                <div className="w-2.5 h-2.5 rounded-full bg-sky-500" />
+                <span className="text-xs font-medium text-gray-600 dark:text-gray-300 uppercase tracking-wider">
+                  DOWNLOAD
+                </span>
+              </div>
+              <div className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white tabular-nums">
+                {results.download !== null ? results.download.toFixed(1) : "—"}
+              </div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">Mbps</div>
+            </div>
+
+            {/* Upload Card */}
+            <div className={`bg-white/80 dark:bg-gray-900/80 backdrop-blur-sm rounded-2xl p-4 shadow-lg border-2 transition-all duration-300 ${
+              testState.step === "upload" ? "border-emerald-400 shadow-emerald-500/20" : "border-gray-100 dark:border-gray-800"
+            }`}>
+              <div className="flex items-center gap-2 mb-2">
+                <div className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
+                <span className="text-xs font-medium text-gray-600 dark:text-gray-300 uppercase tracking-wider">
+                  UPLOAD
+                </span>
+              </div>
+              <div className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white tabular-nums">
+                {results.upload !== null ? results.upload.toFixed(1) : "—"}
+              </div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">Mbps</div>
+            </div>
+          </div>
+
+          {/* Speedometer Gauge */}
+          <div className="w-full flex flex-col items-center gap-4">
+            <SpeedometerGauge
+              speed={gaugeSpeed}
+              maxSpeed={1000}
+              label={getStepLabel()}
+              size={360}
+            />
+
+            {/* Server Status Line */}
+            <div className="w-full max-w-md text-center">
+              <p className={`text-sm font-mono transition-colors duration-300 ${
+                testState.step === "ping" ? "text-violet-600 dark:text-violet-400" : "text-slate-500 dark:text-slate-400"
+              }`}>
+                {testState.serverStatus}
+              </p>
             </div>
 
             {/* START Button */}
             <button
               onClick={handleStartTest}
               disabled={isButtonDisabled}
-              className="mt-6 sm:mt-8 gradient-btn text-white px-8 sm:px-12 py-3 sm:py-4 rounded-full text-lg sm:text-xl font-semibold shadow-lg shadow-violet-500/30 hover:shadow-violet-500/50 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:shadow-none focus:outline-none focus:ring-4 focus:ring-violet-500/30 min-w-[200px] sm:min-w-[240px]"
+              className="gradient-btn text-white px-10 py-4 rounded-full text-lg font-semibold shadow-lg shadow-violet-500/30 hover:shadow-violet-500/50 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:shadow-none focus:outline-none focus:ring-4 focus:ring-violet-500/30 min-w-[220px] w-full sm:w-auto"
             >
               {getButtonText()}
             </button>
 
-            {/* Status Line */}
-            <p className="mt-6 text-center text-gray-600 dark:text-gray-300 text-lg min-h-[1.5rem]">
-              {testState.errorMessage || getStepText()}
-            </p>
+            {/* Error Message */}
+            {testState.step === "error" && (
+              <div className="w-full max-w-md text-center p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl">
+                <p className="text-red-700 dark:text-red-300 mb-3 text-sm">
+                  {testState.errorMessage}
+                </p>
+                <button
+                  onClick={handleRetry}
+                  className="gradient-btn text-white px-6 py-2 rounded-full font-medium hover:opacity-90 transition-opacity"
+                >
+                  Try again
+                </button>
+              </div>
+            )}
           </div>
 
-          {/* Live Speed Graph Placeholder */}
-          <div className="mb-8 sm:mb-10 w-full max-w-2xl mx-auto">
-            <canvas
-              ref={(canvas) => {
-                if (canvas && graphData.length > 0) {
-                  const ctx = canvas.getContext("2d");
-                  if (ctx) {
-                    const dpr = window.devicePixelRatio || 1;
-                    const rect = canvas.getBoundingClientRect();
-                    canvas.width = rect.width * dpr;
-                    canvas.height = rect.height * dpr;
-                    ctx.scale(dpr, dpr);
-
-                    const width = rect.width;
-                    const height = rect.height;
-                    ctx.clearRect(0, 0, width, height);
-
-                    // Draw grid
-                    ctx.strokeStyle = "#e0e7ff";
-                    ctx.lineWidth = 1;
-                    for (let i = 0; i <= 5; i++) {
-                      const y = (height / 5) * i;
-                      ctx.beginPath();
-                      ctx.moveTo(0, y);
-                      ctx.lineTo(width, y);
-                      ctx.stroke();
-                    }
-
-                    // Draw data line
-                    if (graphData.length > 1) {
-                      ctx.strokeStyle = "#8b5cf6";
-                      ctx.lineWidth = 3;
-                      ctx.lineCap = "round";
-                      ctx.lineJoin = "round";
-                      ctx.beginPath();
-                      graphData.forEach((value, index) => {
-                        const x = (width / (graphData.length - 1)) * index;
-                        const y = height - (value / 1000) * height * 0.9 - height * 0.05;
-                        if (index === 0) ctx.moveTo(x, y);
-                        else ctx.lineTo(x, y);
-                      });
-                      ctx.stroke();
-                    }
-                  }
-                }
-              }}
-              className="speed-graph w-full h-32 sm:h-40"
-              style={{ width: "100%", height: "100%" }}
-              aria-label="Live speed graph"
-            />
-            <p className="text-center text-sm text-gray-500 dark:text-gray-400 mt-2">
-              Live speed graph
-            </p>
-          </div>
-
-          {/* Result Cards */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
-            {/* Download Card */}
-            <div className="bg-white/80 dark:bg-gray-900/80 backdrop-blur-sm rounded-2xl p-4 sm:p-6 download-accent shadow-lg shadow-blue-500/10 border border-gray-100 dark:border-gray-800 min-w-0">
-              <div className="flex items-center gap-2 mb-2 sm:mb-3">
-                <div className="w-2.5 h-2.5 sm:w-3 sm:h-3 rounded-full bg-sky-500 flex-shrink-0" />
-                <span className="text-xs sm:text-sm font-medium text-gray-600 dark:text-gray-300 uppercase tracking-wide truncate">
-                  Download
+          {/* Result Cards - Always visible at bottom */}
+          <div className="w-full grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4 mt-4">
+            {/* Download Result Card */}
+            <div className="bg-white/80 dark:bg-gray-900/80 backdrop-blur-sm rounded-2xl p-4 download-accent shadow-lg shadow-blue-500/10 border border-gray-100 dark:border-gray-800 min-w-0">
+              <div className="flex items-center gap-2 mb-2">
+                <div className="w-2.5 h-2.5 rounded-full bg-sky-500" />
+                <span className="text-xs font-medium text-gray-600 dark:text-gray-300 uppercase tracking-wider">
+                  DOWNLOAD
                 </span>
               </div>
-              {testState.failedStep === 2 && testState.status === "error" ? (
-                <div className="text-center text-red-600 dark:text-red-400">
-                  <p className="text-base sm:text-lg font-medium mb-2">Error</p>
-                  <p className="text-xs sm:text-sm mb-3 break-words">{testState.errorMessage}</p>
-                  <button
-                    onClick={handleRetry}
-                    className="gradient-btn text-white px-3 sm:px-4 py-1.5 rounded-full text-xs sm:text-sm font-medium hover:opacity-90 transition-opacity"
-                  >
-                    Try again
-                  </button>
-                </div>
-              ) : (
-                <>
-                  <div className="text-2xl sm:text-3xl md:text-4xl font-bold text-gray-900 dark:text-white">
-                    {results.download !== null ? results.download.toFixed(1) : "—"}
-                  </div>
-                  <div className="text-xs sm:text-sm text-gray-500 dark:text-gray-400 mt-1">Mbps</div>
-                </>
-              )}
+              <div className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white tabular-nums">
+                {results.download !== null ? results.download.toFixed(1) : "—"}
+              </div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">Mbps</div>
             </div>
 
-            {/* Upload Card */}
-            <div className="bg-white/80 dark:bg-gray-900/80 backdrop-blur-sm rounded-2xl p-4 sm:p-6 upload-accent shadow-lg shadow-green-500/10 border border-gray-100 dark:border-gray-800 min-w-0">
-              <div className="flex items-center gap-2 mb-2 sm:mb-3">
-                <div className="w-2.5 h-2.5 sm:w-3 sm:h-3 rounded-full bg-emerald-500 flex-shrink-0" />
-                <span className="text-xs sm:text-sm font-medium text-gray-600 dark:text-gray-300 uppercase tracking-wide truncate">
-                  Upload
+            {/* Upload Result Card */}
+            <div className="bg-white/80 dark:bg-gray-900/80 backdrop-blur-sm rounded-2xl p-4 upload-accent shadow-lg shadow-green-500/10 border border-gray-100 dark:border-gray-800 min-w-0">
+              <div className="flex items-center gap-2 mb-2">
+                <div className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
+                <span className="text-xs font-medium text-gray-600 dark:text-gray-300 uppercase tracking-wider">
+                  UPLOAD
                 </span>
               </div>
-              {testState.failedStep === 3 && testState.status === "error" ? (
-                <div className="text-center text-red-600 dark:text-red-400">
-                  <p className="text-base sm:text-lg font-medium mb-2">Error</p>
-                  <p className="text-xs sm:text-sm mb-3 break-words">{testState.errorMessage}</p>
-                  <button
-                    onClick={handleRetry}
-                    className="gradient-btn text-white px-3 sm:px-4 py-1.5 rounded-full text-xs sm:text-sm font-medium hover:opacity-90 transition-opacity"
-                  >
-                    Try again
-                  </button>
-                </div>
-              ) : (
-                <>
-                  <div className="text-2xl sm:text-3xl md:text-4xl font-bold text-gray-900 dark:text-white">
-                    {results.upload !== null ? results.upload.toFixed(1) : "—"}
-                  </div>
-                  <div className="text-xs sm:text-sm text-gray-500 dark:text-gray-400 mt-1">Mbps</div>
-                </>
-              )}
+              <div className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white tabular-nums">
+                {results.upload !== null ? results.upload.toFixed(1) : "—"}
+              </div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">Mbps</div>
             </div>
 
-            {/* Ping Card */}
-            <div className="bg-white/80 dark:bg-gray-900/80 backdrop-blur-sm rounded-2xl p-4 sm:p-6 ping-accent shadow-lg shadow-amber-500/10 border border-gray-100 dark:border-gray-800 min-w-0">
-              <div className="flex items-center gap-2 mb-2 sm:mb-3">
-                <div className="w-2.5 h-2.5 sm:w-3 sm:h-3 rounded-full bg-amber-500 flex-shrink-0" />
-                <span className="text-xs sm:text-sm font-medium text-gray-600 dark:text-gray-300 uppercase tracking-wide truncate">
-                  Ping
+            {/* Ping Result Card */}
+            <div className="bg-white/80 dark:bg-gray-900/80 backdrop-blur-sm rounded-2xl p-4 ping-accent shadow-lg shadow-amber-500/10 border border-gray-100 dark:border-gray-800 min-w-0">
+              <div className="flex items-center gap-2 mb-2">
+                <div className="w-2.5 h-2.5 rounded-full bg-amber-500" />
+                <span className="text-xs font-medium text-gray-600 dark:text-gray-300 uppercase tracking-wider">
+                  PING
                 </span>
               </div>
-              {testState.failedStep === 1 && testState.status === "error" ? (
-                <div className="text-center text-red-600 dark:text-red-400">
-                  <p className="text-base sm:text-lg font-medium mb-2">Error</p>
-                  <p className="text-xs sm:text-sm mb-3 break-words">{testState.errorMessage}</p>
-                  <button
-                    onClick={handleRetry}
-                    className="gradient-btn text-white px-3 sm:px-4 py-1.5 rounded-full text-xs sm:text-sm font-medium hover:opacity-90 transition-opacity"
-                  >
-                    Try again
-                  </button>
-                </div>
-              ) : (
-                <>
-                  <div className="text-2xl sm:text-3xl md:text-4xl font-bold text-gray-900 dark:text-white">
-                    {results.ping !== null ? results.ping.toFixed(0) : "—"}
-                  </div>
-                  <div className="text-xs sm:text-sm text-gray-500 dark:text-gray-400 mt-1">ms</div>
-                </>
-              )}
+              <div className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white tabular-nums">
+                {results.ping !== null ? results.ping.toFixed(0) : "—"}
+              </div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">ms</div>
             </div>
           </div>
 
-          {/* Result Summary */}
-          {testState.status === "complete" && results.download !== null && results.upload !== null && results.ping !== null && (
-            <div className="mt-6 sm:mt-8 w-full max-w-4xl">
-              <div className="bg-white/80 dark:bg-gray-900/80 backdrop-blur-sm rounded-2xl p-4 sm:p-6 shadow-lg border border-gray-100 dark:border-gray-800">
-                <div className="text-center mb-4">
-                  <p className="text-base sm:text-lg font-semibold text-gray-900 dark:text-white mb-2">
+          {/* Final Result Summary */}
+          {testState.step === "complete" && results.download !== null && results.upload !== null && results.ping !== null && (
+            <div className="w-full max-w-4xl mt-6">
+              <div className="bg-white/80 dark:bg-gray-900/80 backdrop-blur-sm rounded-2xl p-6 shadow-xl border border-gray-100 dark:border-gray-800">
+                <div className="text-center mb-6">
+                  <p className="text-lg font-semibold text-gray-900 dark:text-white mb-3">
                     Test Result Summary
                   </p>
-                  <p className="text-sm sm:text-base text-gray-600 dark:text-gray-300 break-words">
-                    Download {results.download.toFixed(1)} Mbps • Upload {results.upload.toFixed(1)} Mbps • Ping {results.ping.toFixed(0)} ms
-                  </p>
-                  <p className="mt-3 text-lg sm:text-xl font-bold text-violet-600 dark:text-violet-400">
+                  <div className="grid grid-cols-3 gap-4 mb-6">
+                    <div className="p-4 bg-sky-50 dark:bg-sky-900/20 rounded-xl">
+                      <p className="text-xs font-medium text-sky-600 dark:text-sky-400 uppercase tracking-wider mb-1">DOWNLOAD</p>
+                      <p className="text-3xl font-bold text-gray-900 dark:text-white">{results.download.toFixed(1)}</p>
+                      <p className="text-xs text-gray-500 dark:text-gray-400">Mbps</p>
+                    </div>
+                    <div className="p-4 bg-emerald-50 dark:bg-emerald-900/20 rounded-xl">
+                      <p className="text-xs font-medium text-emerald-600 dark:text-emerald-400 uppercase tracking-wider mb-1">UPLOAD</p>
+                      <p className="text-3xl font-bold text-gray-900 dark:text-white">{results.upload.toFixed(1)}</p>
+                      <p className="text-xs text-gray-500 dark:text-gray-400">Mbps</p>
+                    </div>
+                    <div className="p-4 bg-amber-50 dark:bg-amber-900/20 rounded-xl">
+                      <p className="text-xs font-medium text-amber-600 dark:text-amber-400 uppercase tracking-wider mb-1">PING</p>
+                      <p className="text-3xl font-bold text-gray-900 dark:text-white">{results.ping.toFixed(0)}</p>
+                      <p className="text-xs text-gray-500 dark:text-gray-400">ms</p>
+                    </div>
+                  </div>
+                  <p className="text-2xl font-bold text-violet-600 dark:text-violet-400">
                     {getRating(results.download)}
                   </p>
                 </div>
@@ -361,26 +374,26 @@ export default function Home() {
 
               {/* History List */}
               {history.length > 0 && (
-                <div className="mt-4 sm:mt-6 w-full max-w-4xl">
+                <div className="mt-6 w-full max-w-4xl">
                   <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
-                    <h3 className="text-base sm:text-lg font-semibold text-gray-900 dark:text-white">Pichle Tests</h3>
+                    <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Pichle Tests</h3>
                     <button
                       onClick={handleClearHistory}
-                      className="text-xs sm:text-sm text-red-600 dark:text-red-400 hover:underline self-start sm:self-auto"
+                      className="text-sm text-red-600 dark:text-red-400 hover:underline self-start sm:self-auto"
                     >
                       History saaf karo
                     </button>
                   </div>
-                  <div className="bg-white/80 dark:bg-gray-900/80 backdrop-blur-sm rounded-2xl p-3 sm:p-4 shadow-lg border border-gray-100 dark:border-gray-800 space-y-2">
+                  <div className="bg-white/80 dark:bg-gray-900/80 backdrop-blur-sm rounded-2xl p-4 shadow-lg border border-gray-100 dark:border-gray-800 space-y-2">
                     {history.map((entry) => (
-                      <div key={entry.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 p-2 sm:p-3 bg-gray-50 dark:bg-gray-800/50 rounded-xl">
-                        <div className="flex flex-wrap items-center gap-2 sm:gap-3 text-xs sm:text-sm text-gray-700 dark:text-gray-300">
+                      <div key={entry.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 p-3 bg-gray-50 dark:bg-gray-800/50 rounded-xl">
+                        <div className="flex flex-wrap items-center gap-2 sm:gap-3 text-sm text-gray-700 dark:text-gray-300">
                           <span className="font-medium text-sky-600 dark:text-sky-400">↓ {entry.download.toFixed(1)} Mbps</span>
                           <span className="font-medium text-emerald-600 dark:text-emerald-400">↑ {entry.upload.toFixed(1)} Mbps</span>
                           <span className="font-medium text-amber-600 dark:text-amber-400">{entry.ping.toFixed(0)} ms</span>
                           <span className="text-gray-500 dark:text-gray-400">{formatTimestamp(entry.timestamp)}</span>
                         </div>
-                        <span className="text-xs sm:text-sm font-medium text-violet-600 dark:text-violet-400">
+                        <span className="text-sm font-medium text-violet-600 dark:text-violet-400">
                           {getRating(entry.download)}
                         </span>
                       </div>
@@ -394,7 +407,7 @@ export default function Home() {
       </main>
 
       {/* Footer */}
-      <footer className="py-8 px-4 text-center text-sm text-gray-500 dark:text-gray-400">
+      <footer className="py-6 px-4 text-center text-sm text-gray-500 dark:text-gray-400">
         Powered by Cloudflare Speed Test API
       </footer>
     </div>
