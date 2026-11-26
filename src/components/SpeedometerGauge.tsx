@@ -10,12 +10,13 @@ interface SpeedometerGaugeProps {
 }
 
 const MARKINGS = [0, 5, 10, 50, 100, 250, 500, 750, 1000];
+const MAJOR_MARKINGS = [0, 100, 250, 500, 750, 1000];
 
 export default function SpeedometerGauge({
   speed,
   maxSpeed = 1000,
   label,
-  size = 320,
+  size = 360,
 }: SpeedometerGaugeProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const needleRef = useRef<SVGPathElement>(null);
@@ -52,7 +53,7 @@ export default function SpeedometerGauge({
       const rad = (angle * Math.PI) / 180;
 
       // Major markings (longer) vs minor
-      const isMajor = [0, 100, 250, 500, 750, 1000].includes(marking);
+      const isMajor = MAJOR_MARKINGS.includes(marking);
       const markLength = isMajor ? radius * 0.18 : radius * 0.1;
       const markWidth = isMajor ? 3 : 1.5;
 
@@ -76,7 +77,9 @@ export default function SpeedometerGauge({
 
       // Label for major markings
       if (isMajor) {
-        const labelRadius = radius + 28;
+        // Give extra horizontal space for edge labels (0 and 1000)
+        const isEdge = marking === 0 || marking === 1000;
+        const labelRadius = radius + (isEdge ? 42 : 32);
         const labelX = centerX + labelRadius * Math.cos(rad);
         const labelY = centerY + labelRadius * Math.sin(rad);
 
@@ -85,9 +88,9 @@ export default function SpeedometerGauge({
         text.setAttribute("x", labelX.toString());
         text.setAttribute("y", (labelY + 5).toString());
         text.setAttribute("text-anchor", "middle");
-        text.setAttribute("font-size", "13");
-        text.setAttribute("font-weight", "600");
-        text.setAttribute("fill", "#475569");
+        text.setAttribute("font-size", isEdge ? "14" : "13");
+        text.setAttribute("font-weight", "700");
+        text.setAttribute("fill", "#334155");
         text.setAttribute("font-family", "system-ui, -apple-system, sans-serif");
         text.textContent = marking.toString();
         svg.appendChild(text);
@@ -110,7 +113,7 @@ export default function SpeedometerGauge({
       <div className="relative w-full h-auto">
         <svg
           ref={svgRef}
-          viewBox={`0 0 ${size} ${size}`}
+          viewBox={`-${size * 0.08} 0 ${size * 1.16} ${size}`}
           className="w-full h-auto"
           preserveAspectRatio="xMidYMid meet"
           style={{ maxWidth: `${size}px` }}

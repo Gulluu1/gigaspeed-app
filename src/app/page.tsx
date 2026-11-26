@@ -18,7 +18,7 @@ interface TestState {
   serverStatus: string;
 }
 
-const STEP_TIMEOUT = 15000; // 15 seconds per step
+const STEP_TIMEOUT = 30000; // 30 seconds per step (download can take longer with chunked approach)
 
 export default function Home() {
   const [results, setResults] = useState<SpeedResult>({

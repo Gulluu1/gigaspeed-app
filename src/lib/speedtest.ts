@@ -104,15 +104,20 @@ export async function measurePing(signal?: AbortSignal): Promise<PingResult> {
 }
 
 export async function measureDownload(onProgress: (mbps: number) => void, signal?: AbortSignal): Promise<number> {
-  const url = "https://speed.cloudflare.com/__down?bytes=25000000";
-  const minDurationMs = 5000; // Minimum 5 seconds for accurate measurement
+  const chunkSize = 10 * 1024 * 1024; // 10 MB per chunk
+  const totalSize = 50 * 1024 * 1024; // 50 MB total target
+  const stallTimeoutMs = 3000; // 3 seconds stall = abandon chunk
   const progressIntervalMs = 200; // Report progress every 200ms
+  const minFirstChunkMs = 2000; // Minimum 2 seconds for first chunk to be valid
 
   let totalBytes = 0;
-  const startTime = performance.now();
-  let lastProgressTime = startTime;
+  const overallStartTime = performance.now();
+  let lastProgressTime = overallStartTime;
+  let firstChunkDurationMs = 0;
+  let firstChunkBytes = 0;
 
-  async function runDownload(): Promise<number> {
+  async function fetchChunk(): Promise<{ bytes: number; durationMs: number }> {
+    const url = `https://speed.cloudflare.com/__down?bytes=${chunkSize}`;
     let response: Response;
     try {
       response = await fetch(url, {
@@ -141,46 +146,75 @@ export async function measureDownload(onProgress: (mbps: number) => void, signal
       throw new Error("Response body is not readable");
     }
 
-    const chunks: Uint8Array[] = [];
+    let chunkBytes = 0;
+    const chunkStartTime = performance.now();
+    let lastDataTime = chunkStartTime;
 
     while (true) {
       if (signal?.aborted) throw new Error("Test cancelled");
+
+      // Check for stall
+      const now = performance.now();
+      if (now - lastDataTime >= stallTimeoutMs && chunkBytes > 0) {
+        break; // Stall detected, abandon this chunk
+      }
+
       const { done, value } = await reader.read();
       if (done) break;
 
-      chunks.push(value);
+      chunkBytes += value.length;
       totalBytes += value.length;
+      lastDataTime = performance.now();
 
-      const now = performance.now();
-      if (now - lastProgressTime >= progressIntervalMs) {
-        const elapsedMs = now - startTime;
+      // Report progress
+      if (lastDataTime - lastProgressTime >= progressIntervalMs) {
+        const elapsedMs = lastDataTime - overallStartTime;
         const elapsedSec = elapsedMs / 1000;
         const mbps = (totalBytes * 8) / (elapsedSec * 1_000_000);
         onProgress(mbps);
-        lastProgressTime = now;
+        lastProgressTime = lastDataTime;
       }
     }
 
-    // Final progress update
-    const finalElapsedMs = performance.now() - startTime;
+    const chunkDurationMs = performance.now() - chunkStartTime;
+    return { bytes: chunkBytes, durationMs: chunkDurationMs };
+  }
+
+  // Fetch first chunk
+  const firstChunk = await fetchChunk();
+  firstChunkDurationMs = firstChunk.durationMs;
+  firstChunkBytes = firstChunk.bytes;
+
+  // If first chunk took >= 2 seconds, use it as final measurement
+  if (firstChunkDurationMs >= minFirstChunkMs && firstChunkBytes > 0) {
+    const finalElapsedMs = performance.now() - overallStartTime;
     const finalElapsedSec = finalElapsedMs / 1000;
     const finalMbps = (totalBytes * 8) / (finalElapsedSec * 1_000_000);
     onProgress(finalMbps);
-
     return finalMbps;
   }
 
-  // Run download at least once
-  let finalMbps = await runDownload();
-  const totalElapsedMs = performance.now() - startTime;
+  // First chunk was too fast (< 2s), continue fetching chunks until we reach target or minimum duration
+  const minDurationMs = 5000; // Minimum 5 seconds total
+  let totalElapsedMs = performance.now() - overallStartTime;
 
-  // If completed too fast (< 2s), repeat until we reach minimum duration
-  while (totalElapsedMs < minDurationMs) {
+  while (totalElapsedMs < minDurationMs && totalBytes < totalSize) {
     if (signal?.aborted) throw new Error("Test cancelled");
-    const additionalMbps = await runDownload();
-    // Weighted average favoring the latest measurement
-    finalMbps = (finalMbps + additionalMbps) / 2;
+    try {
+      await fetchChunk();
+    } catch (error) {
+      // If chunk stalled/failed, continue to next chunk (don't fail entire test)
+      if (error instanceof Error && error.message === "Test cancelled") throw error;
+      // Log and continue - stall or error on this chunk, try next
+    }
+    totalElapsedMs = performance.now() - overallStartTime;
   }
+
+  // Final measurement
+  const finalElapsedMs = performance.now() - overallStartTime;
+  const finalElapsedSec = finalElapsedMs / 1000;
+  const finalMbps = (totalBytes * 8) / (finalElapsedSec * 1_000_000);
+  onProgress(finalMbps);
 
   return finalMbps;
 }
