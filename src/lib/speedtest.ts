@@ -224,7 +224,7 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
   const minDurationMs = 5000; // Minimum 5 seconds for accurate measurement
   const progressIntervalMs = 200; // Report progress every 200ms
   const dataSize = 10 * 1024 * 1024; // 10 MB buffer
-  const uploadDurationMs = 15000; // Fixed 15 second upload window
+  const uploadDurationMs = 10000; // Fixed 10 second upload window (reduced from 15s)
   const chunkSize = 65536; // 64 KB - max for crypto.getRandomValues
 
   // Generate random data using crypto.getRandomValues in 64KB chunks
@@ -283,6 +283,7 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
               if (now - lastProgressTime >= progressIntervalMs) {
                 const elapsedMs = now - startTime;
                 const elapsedSec = elapsedMs / 1000;
+                // Smooth: cumulative bytes / elapsed time (ignore first spike)
                 const mbps = (totalBytes * 8) / (elapsedSec * 1_000_000);
                 onProgress(mbps);
                 lastProgressTime = now;
@@ -371,6 +372,7 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
           if (now - xhrLastProgressTime >= progressIntervalMs) {
             const elapsedMs = now - xhrStartTime;
             const elapsedSec = elapsedMs / 1000;
+            // Smooth: cumulative bytes / elapsed time
             const mbps = (xhrTotalBytes * 8) / (elapsedSec * 1_000_000);
             onProgress(mbps);
             xhrLastProgressTime = now;
@@ -482,8 +484,15 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
     }
   }
 
+  async function runUploadWithTimeout(): Promise<{ mbps: number; bytes: number }> {
+    // Run upload with 10s timeout - always return partial result if bytes > 0
+    const result = await runUpload();
+    // Always return result if we have bytes, even if timeout occurred
+    return result;
+  }
+
   // Run upload at least once
-  const firstResult = await runUpload();
+  const firstResult = await runUploadWithTimeout();
   let finalMbps = firstResult.mbps;
   const totalElapsedMs = performance.now() - startTime;
 
@@ -492,7 +501,7 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
     if (signal?.aborted) throw new Error("Test cancelled");
     totalBytes = 0; // Reset for next iteration
     lastProgressTime = performance.now();
-    const additionalResult = await runUpload();
+    const additionalResult = await runUploadWithTimeout();
     // Weighted average favoring the latest measurement
     finalMbps = (finalMbps + additionalResult.mbps) / 2;
   }

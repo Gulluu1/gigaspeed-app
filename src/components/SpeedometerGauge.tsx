@@ -35,8 +35,11 @@ export default function SpeedometerGauge({
   const centerY = size / 2;
   // Dial radius - all measurements from this
   const dialRadius = size * 0.4;
-  // Arc radius - smaller than dial, stays inside
-  const arcRadius = dialRadius * 0.82;
+  // Arc stroke width
+  const arcStrokeWidth = size * 0.018;
+  // Arc radius - accounts for stroke width so arc stays inside dial
+  // arcRadius + arcStrokeWidth/2 <= dialRadius
+  const arcRadius = dialRadius - arcStrokeWidth / 2 - 2;
   // Needle length - ends at arc
   const needleLength = arcRadius * 0.95;
   // Pivot radius - small, max 12px
@@ -148,9 +151,18 @@ export default function SpeedometerGauge({
         viewBox={`-${size * 0.02} -${size * 0.02} ${size * 1.04} ${size * 1.18}`}
         className="w-full h-auto"
         preserveAspectRatio="xMidYMid meet"
-        style={{ pointerEvents: "none", maxWidth: `${size}px` }}
+        style={{
+          pointerEvents: "none",
+          maxWidth: `${size}px`,
+          overflow: "hidden",
+        }}
       >
         <defs>
+          {/* Clip path to contain arc within dial */}
+          <clipPath id="arcClip">
+            <circle cx={centerX} cy={centerY} r={dialRadius - 4} />
+          </clipPath>
+
           {/* Arc gradient - premium multi-stop */}
           <linearGradient id="gaugeArcGradient" x1="0%" y1="0%" x2="100%" y2="0%">
             <stop offset="0%" stopColor="#06b6d4" />
@@ -197,13 +209,15 @@ export default function SpeedometerGauge({
           opacity="0.35"
         />
 
-        {/* Progress arc - at arcRadius, 270 degrees */}
+        {/* Progress arc - at arcRadius, 270 degrees (-135 to +135) */}
+        {/* Arc starts at -135° (bottom-left), sweeps 270° to +135° (bottom-right) */}
         <path
-          d={`M ${centerX} ${centerY - arcRadius} A ${arcRadius} ${arcRadius} 0 1 1 ${centerX + arcRadius * 0.9999} ${centerY}`}
+          clipPath="url(#arcClip)"
+          d={`M ${centerX + arcRadius * Math.cos(-135 * Math.PI / 180)} ${centerY + arcRadius * Math.sin(-135 * Math.PI / 180)} A ${arcRadius} ${arcRadius} 0 1 1 ${centerX + arcRadius * Math.cos(135 * Math.PI / 180)} ${centerY + arcRadius * Math.sin(135 * Math.PI / 180)}`}
           fill="none"
           stroke="url(#gaugeArcGradient)"
-          strokeWidth={size * 0.018}
-          strokeLinecap="round"
+          strokeWidth={arcStrokeWidth}
+          strokeLinecap="butt"
           strokeDasharray={`${(Math.PI * 1.5 * arcRadius).toFixed(1)} ${(Math.PI * 0.5 * arcRadius).toFixed(1)}`}
           strokeDashoffset={`${(Math.PI * 1.5 * arcRadius * (1 - clampedSpeed / maxSpeed)).toFixed(1)}`}
           style={{
@@ -319,12 +333,6 @@ export default function SpeedometerGauge({
         )}
       </div>
 
-      {/* Label below gauge - proper gap for Server line */}
-      <div className="absolute bottom-[-48px] left-1/2 -translate-x-1/2 text-center w-full">
-        <p className="text-sm font-medium text-slate-600 dark:text-slate-400 uppercase tracking-wider">
-          {label}
-        </p>
       </div>
-    </div>
   );
 }
