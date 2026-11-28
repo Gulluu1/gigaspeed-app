@@ -45,14 +45,25 @@ export default function SpeedometerGauge({
   // Pivot radius - small, max 12px
   const pivotRadius = Math.min(size * 0.03, 12);
 
-  // Convert speed to angle (-135 to +135 degrees, 0 at bottom)
-  const speedToAngle = useCallback((value: number): number => {
-    return (value / maxSpeed) * 270 - 135;
+  // Log scale conversion: map speed to sweep angle
+  // log10(speed + 1) / log10(maxSpeed + 1) * 270
+  // 0 Mbps -> log10(1) = 0 -> 0° sweep
+  // maxSpeed Mbps -> log10(maxSpeed+1) -> 270° sweep
+  const speedToSweepAngle = useCallback((value: number): number => {
+    if (value <= 0) return 0;
+    const logMax = Math.log10(maxSpeed + 1);
+    const logVal = Math.log10(value + 1);
+    return (logVal / logMax) * 270;
   }, [maxSpeed]);
 
-  // Calculate arc sweep angle based on speed (0 to 270 degrees)
-  const sweepAngle = (clampedSpeed / maxSpeed) * 270;
+  // Convert sweep angle to needle angle (0° at -135°)
+  const sweepAngle = speedToSweepAngle(clampedSpeed);
   const endAngle = -135 + sweepAngle; // Start at -135°, sweep clockwise
+
+  // Convert speed to angle for needle (-135 to +135 degrees, 0 at bottom)
+  const speedToAngle = useCallback((value: number): number => {
+    return speedToSweepAngle(value) - 135;
+  }, [speedToSweepAngle]);
 
   // Calculate arc path - only draw the visible sweep portion
   const startAngleRad = (-135 * Math.PI) / 180;
