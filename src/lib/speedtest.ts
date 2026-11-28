@@ -47,21 +47,40 @@ export function getRating(downloadMbps: number): string {
   return "Slow";
 }
 
+export interface PingResult {
+  ping: number;
+  jitter: number;
+  failed?: boolean; // true if all retries failed
+}
+
 export async function measurePing(signal?: AbortSignal): Promise<PingResult> {
   const url = "https://speed.cloudflare.com/__down?bytes=0";
   const samples: number[] = [];
-  const maxAttempts = 5;
+  const maxRetries = 3; // 3 retries
+  const attemptTimeoutMs = 10000; // 10s timeout per attempt
 
-  for (let i = 0; i < maxAttempts; i++) {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
     if (signal?.aborted) throw new Error("Test cancelled");
-    const start = performance.now();
+
+    // Create a timeout for this attempt
+    const attemptController = new AbortController();
+    const attemptTimeout = setTimeout(() => attemptController.abort(), attemptTimeoutMs);
+
+    // Combine signals
+    const combinedSignal = signal
+      ? AbortSignal.any([signal, attemptController.signal])
+      : attemptController.signal;
+
     try {
+      const start = performance.now();
       const response = await fetch(url, {
         method: "GET",
         cache: "no-store",
         mode: "cors",
-        signal,
+        signal: combinedSignal,
       });
+
+      clearTimeout(attemptTimeout);
 
       if (!response.ok) {
         throw new Error(`HTTP error: ${response.status}`);
@@ -71,36 +90,48 @@ export async function measurePing(signal?: AbortSignal): Promise<PingResult> {
       await response.arrayBuffer();
       const end = performance.now();
       samples.push(end - start);
+
+      // If we got a successful sample, we can break early (optional: keep all 5 for jitter)
     } catch (error) {
+      clearTimeout(attemptTimeout);
       if (signal?.aborted) throw new Error("Test cancelled");
+      if (error instanceof DOMException && error.name === "AbortError") {
+        // Timeout or external abort - continue to next retry
+        console.log(`[Ping] Attempt ${attempt + 1} timed out, retrying...`);
+        continue;
+      }
       if (error instanceof TypeError && error.message.includes("fetch")) {
+        // Network error - this is likely a real connectivity issue
+        console.log(`[Ping] Attempt ${attempt + 1} network error:`, error.message);
+        // Don't retry network errors - they'll likely fail again
         throw new Error("Internet se connect nahi ho pa raha. Wi-Fi/data check karke dobara try karo.");
       }
-      if (error instanceof DOMException && error.name === "AbortError") {
-        throw new Error("Test cancelled");
+      console.log(`[Ping] Attempt ${attempt + 1} failed:`, error instanceof Error ? error.message : error);
+      // Continue to next retry for other errors
+    }
+  }
+
+  // If we have at least one sample, return it
+  if (samples.length > 0) {
+    // Ping = minimum time (best case)
+    const ping = Math.min(...samples);
+
+    // Jitter = average difference between consecutive readings
+    let jitter = 0;
+    if (samples.length > 1) {
+      const diffs: number[] = [];
+      for (let i = 1; i < samples.length; i++) {
+        diffs.push(Math.abs(samples[i] - samples[i - 1]));
       }
-      throw new Error(`Ping measurement failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+      jitter = diffs.reduce((a, b) => a + b, 0) / diffs.length;
     }
+
+    return { ping, jitter };
   }
 
-  if (samples.length === 0) {
-    throw new Error("No successful ping measurements");
-  }
-
-  // Ping = minimum time (best case)
-  const ping = Math.min(...samples);
-
-  // Jitter = average difference between consecutive readings
-  let jitter = 0;
-  if (samples.length > 1) {
-    const diffs: number[] = [];
-    for (let i = 1; i < samples.length; i++) {
-      diffs.push(Math.abs(samples[i] - samples[i - 1]));
-    }
-    jitter = diffs.reduce((a, b) => a + b, 0) / diffs.length;
-  }
-
-  return { ping, jitter };
+  // All retries failed - return failed result instead of throwing
+  console.log("[Ping] All retries failed, returning failed result");
+  return { ping: 0, jitter: 0, failed: true };
 }
 
 export async function measureDownload(onProgress: (mbps: number) => void, signal?: AbortSignal): Promise<number> {
@@ -227,11 +258,8 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
   const uploadDurationMs = 10000; // Fixed 10 second upload window
   const chunkSize = 65536; // 64 KB - max for crypto.getRandomValues
 
-  // For live speed smoothing - keep recent readings for moving average
-  const recentReadings: number[] = [];
-  const SMOOTH_WINDOW = 5; // Keep last 5 readings for moving average
-  const MIN_ELAPSED_FOR_LIVE = 1500; // Ignore first 1.5s for live display
-  const CLAMP_MULTIPLIER = 2; // Live value max 2x running average
+  const EMA_ALPHA = 0.2; // EMA alpha for smoothing
+  const CLAMP_MULTIPLIER = 1.5; // Live value max 1.5x running average
 
   // Generate random data using crypto.getRandomValues in 64KB chunks
   const randomData = new Uint8Array(dataSize);
@@ -245,20 +273,8 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
 
   let totalBytes = 0;
   const startTime = performance.now();
-  let lastProgressTime = startTime;
-  let lastValidLiveMbps = 0; // Track last valid live value
-
-  // Calculate smoothed live speed with clamping
-  function addReadingAndGetSmoothed(rawMbps: number): number {
-    recentReadings.push(rawMbps);
-    if (recentReadings.length > SMOOTH_WINDOW) {
-      recentReadings.shift();
-    }
-    // Return average of recent readings
-    const avg = recentReadings.reduce((a, b) => a + b, 0) / recentReadings.length;
-    // Clamp to 2x running average to prevent spikes
-    return Math.min(rawMbps, avg * CLAMP_MULTIPLIER);
-  }
+  let lastProgressTime = performance.now();
+  let liveMbpsEMA = 0; // EMA smoothed live value
 
   // Try fetch with streaming first, fallback to XHR
   async function runUploadWithFetch(): Promise<{ mbps: number; bytes: number }> {
@@ -303,25 +319,25 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
                 const elapsedMs = now - startTime;
                 const elapsedSec = elapsedMs / 1000;
 
-                // Calculate cumulative speed (total bytes / elapsed time)
+                // Calculate live speed (cumulative, same as download)
                 const cumulativeMbps = (totalBytes * 8) / (elapsedSec * 1_000_000);
 
-                // Only show live speed after initial warmup period
-                if (elapsedMs >= MIN_ELAPSED_FOR_LIVE) {
-                  // Use cumulative as running average, clamp spikes to 2x average
-                  const smoothedMbps = addReadingAndGetSmoothed(cumulativeMbps);
-                  lastValidLiveMbps = smoothedMbps;
-                  onProgress(smoothedMbps);
-                } else {
-                  // During warmup, don't report 0 - show 0 until we have data
-                  onProgress(0);
+                // Only show live speed after initial warmup period (2s)
+                if (elapsedMs >= 2000) {
+                  // Use cumulative as running average (same as download)
+                  // Apply EMA smoothing
+                  const rawMbps = cumulativeMbps;
+                  if (liveMbpsEMA === 0) {
+                    liveMbpsEMA = rawMbps;
+                  } else {
+                    liveMbpsEMA = EMA_ALPHA * rawMbps + (1 - EMA_ALPHA) * liveMbpsEMA;
+                  }
+                  // Clamp to CLAMP_MULTIPLIER x running average
+                  const runningAvg = cumulativeMbps;
+                  const clampedMbps = Math.min(liveMbpsEMA, runningAvg * CLAMP_MULTIPLIER);
+                  onProgress(clampedMbps);
                 }
                 lastProgressTime = now;
-              } else {
-                // No progress event but we have a last valid value - keep showing it
-                if (lastValidLiveMbps > 0) {
-                  onProgress(lastValidLiveMbps);
-                }
               }
 
               await new Promise(r => setTimeout(r, 1));
@@ -349,8 +365,7 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
           "Content-Type": "application/octet-stream",
         },
         duplex: "half",
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any);
+      });
 
       clearTimeout(durationTimeout);
       signal?.removeEventListener("abort", externalAbortHandler);
@@ -383,8 +398,7 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
       let xhrTotalBytes = 0;
       const xhrStartTime = performance.now();
       let xhrLastProgressTime = xhrStartTime;
-      const xhrRecentReadings: number[] = [];
-      let xhrLastValidLiveMbps = 0;
+      let xhrLiveMbpsEMA = 0;
 
       const externalAbortHandler = () => {
         console.log("[Upload] XHR: External abort");
@@ -413,23 +427,19 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
             const elapsedSec = elapsedMs / 1000;
             const cumulativeMbps = (xhrTotalBytes * 8) / (elapsedSec * 1_000_000);
 
-            // Smooth with moving average
-            if (elapsedMs >= MIN_ELAPSED_FOR_LIVE) {
-              xhrRecentReadings.push(cumulativeMbps);
-              if (xhrRecentReadings.length > SMOOTH_WINDOW) xhrRecentReadings.shift();
-              const avg = xhrRecentReadings.reduce((a, b) => a + b, 0) / xhrRecentReadings.length;
-              const smoothedMbps = Math.min(cumulativeMbps, avg * CLAMP_MULTIPLIER);
-              xhrLastValidLiveMbps = smoothedMbps;
-              onProgress(smoothedMbps);
-            } else {
-              onProgress(0);
+            // Smooth with EMA (same as fetch path)
+            if (elapsedMs >= 2000) {
+              const rawMbps = cumulativeMbps;
+              if (xhrLiveMbpsEMA === 0) {
+                xhrLiveMbpsEMA = rawMbps;
+              } else {
+                xhrLiveMbpsEMA = EMA_ALPHA * rawMbps + (1 - EMA_ALPHA) * xhrLiveMbpsEMA;
+              }
+              const runningAvg = cumulativeMbps;
+              const clampedMbps = Math.min(xhrLiveMbpsEMA, runningAvg * CLAMP_MULTIPLIER);
+              onProgress(clampedMbps);
             }
             xhrLastProgressTime = now;
-          } else {
-            // No progress event but keep showing last valid value
-            if (xhrLastValidLiveMbps > 0) {
-              onProgress(xhrLastValidLiveMbps);
-            }
           }
         }
       });
@@ -545,22 +555,21 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
     return result;
   }
 
-  // Run upload at least once
-  const firstResult = await runUploadWithTimeout();
-  let finalMbps = firstResult.mbps;
-  const totalElapsedMs = performance.now() - startTime;
 
-  // If completed too fast (< 2s), repeat until we reach minimum duration
-  while (totalElapsedMs < minDurationMs) {
-    if (signal?.aborted) throw new Error("Test cancelled");
-    totalBytes = 0; // Reset for next iteration
-    // Clear readings for next run
-    recentReadings.length = 0;
-    lastProgressTime = performance.now();
-    const additionalResult = await runUploadWithTimeout();
-    // Weighted average favoring the latest measurement
-    finalMbps = (finalMbps + additionalResult.mbps) / 2;
-  }
+      // Run upload at least once
+      const firstResult = await runUploadWithTimeout();
+      let finalMbps = firstResult.mbps;
+      const totalElapsedMs = performance.now() - startTime;
 
-  return finalMbps;
+      // If completed too fast (< 2s), repeat until we reach minimum duration
+      while (totalElapsedMs < minDurationMs) {
+        if (signal?.aborted) throw new Error("Test cancelled");
+        totalBytes = 0; // Reset for next iteration
+        lastProgressTime = performance.now();
+        const additionalResult = await runUploadWithTimeout();
+        // Weighted average favoring the latest measurement
+        finalMbps = (finalMbps + additionalResult.mbps) / 2;
+      }
+
+      return finalMbps;
 }

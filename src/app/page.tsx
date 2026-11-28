@@ -103,8 +103,14 @@ export default function Home() {
       const pingResult = await withTimeout(measurePing(signal), STEP_TIMEOUT, signal);
       if (signal.aborted) return;
 
-      setResults((prev) => ({ ...prev, ping: pingResult.ping }));
-      setTestState((prev) => ({ ...prev, serverStatus: "Server: Cloudflare Speed Test" }));
+      // Check if ping failed but don't abort test
+      if (pingResult.failed) {
+        setResults((prev) => ({ ...prev, ping: null }));
+        setTestState((prev) => ({ ...prev, serverStatus: "Server: Cloudflare Speed Test (Ping failed)" }));
+      } else {
+        setResults((prev) => ({ ...prev, ping: pingResult.ping }));
+        setTestState((prev) => ({ ...prev, serverStatus: "Server: Cloudflare Speed Test" }));
+      }
 
       // Step 2: Download
       setTestState((prev) => ({ ...prev, step: "download" }));
@@ -138,12 +144,12 @@ export default function Home() {
 
       setResults((prev) => ({ ...prev, upload: uploadMbps }));
 
-      // Test complete - save to history
+      // Test complete - save to history (use 0 for failed ping)
       const newHistory = saveHistory({
         timestamp: Date.now(),
         download: downloadMbps,
         upload: uploadMbps,
-        ping: pingResult.ping,
+        ping: pingResult.failed ? 0 : pingResult.ping,
       });
       setHistory(newHistory);
 
@@ -152,9 +158,9 @@ export default function Home() {
       if (signal.aborted) return;
       const message = error instanceof Error ? error.message : "Test failed";
 
-      // If error happens during upload and we have download/ping results,
+      // If error happens during upload and we have download results,
       // show specific upload error but keep results and go back to idle
-      if (testState.step === "upload" && results.download !== null && results.ping !== null) {
+      if (testState.step === "upload" && results.download !== null) {
         setTestState((prev) => ({
           ...prev,
           step: "idle",
@@ -299,7 +305,7 @@ export default function Home() {
           </div>
 
           {/* Final Result Summary */}
-          {testState.step === "complete" && results.download !== null && results.upload !== null && results.ping !== null && (
+          {testState.step === "complete" && results.download !== null && results.upload !== null && (
             <div className="w-full max-w-4xl">
               <div className="bg-white/80 dark:bg-gray-900/80 backdrop-blur-sm rounded-2xl p-6 shadow-xl border border-gray-100 dark:border-gray-800">
                 <div className="text-center mb-6">
@@ -319,7 +325,7 @@ export default function Home() {
                     </div>
                     <div className="p-4 bg-amber-50 dark:bg-amber-900/20 rounded-xl">
                       <p className="text-xs font-medium text-amber-600 dark:text-amber-400 uppercase tracking-wider mb-1">PING</p>
-                      <p className="text-3xl font-bold text-gray-900 dark:text-white">{results.ping.toFixed(0)}</p>
+                      <p className="text-3xl font-bold text-gray-900 dark:text-white">{results.ping !== null ? results.ping.toFixed(0) : "—"}</p>
                       <p className="text-xs text-gray-500 dark:text-gray-400">ms</p>
                     </div>
                   </div>
