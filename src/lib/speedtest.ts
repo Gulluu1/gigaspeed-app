@@ -231,6 +231,7 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
   const recentReadings: number[] = [];
   const SMOOTH_WINDOW = 5; // Keep last 5 readings for moving average
   const MIN_ELAPSED_FOR_LIVE = 1500; // Ignore first 1.5s for live display
+  const CLAMP_MULTIPLIER = 2; // Live value max 2x running average
 
   // Generate random data using crypto.getRandomValues in 64KB chunks
   const randomData = new Uint8Array(dataSize);
@@ -245,15 +246,18 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
   let totalBytes = 0;
   const startTime = performance.now();
   let lastProgressTime = startTime;
+  let lastValidLiveMbps = 0; // Track last valid live value
 
-  // Calculate smoothed live speed
+  // Calculate smoothed live speed with clamping
   function addReadingAndGetSmoothed(rawMbps: number): number {
     recentReadings.push(rawMbps);
     if (recentReadings.length > SMOOTH_WINDOW) {
       recentReadings.shift();
     }
     // Return average of recent readings
-    return recentReadings.reduce((a, b) => a + b, 0) / recentReadings.length;
+    const avg = recentReadings.reduce((a, b) => a + b, 0) / recentReadings.length;
+    // Clamp to 2x running average to prevent spikes
+    return Math.min(rawMbps, avg * CLAMP_MULTIPLIER);
   }
 
   // Try fetch with streaming first, fallback to XHR
@@ -299,18 +303,25 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
                 const elapsedMs = now - startTime;
                 const elapsedSec = elapsedMs / 1000;
 
-                // Calculate raw speed
-                const rawMbps = (totalBytes * 8) / (elapsedSec * 1_000_000);
+                // Calculate cumulative speed (total bytes / elapsed time)
+                const cumulativeMbps = (totalBytes * 8) / (elapsedSec * 1_000_000);
 
-                // Only show live speed after initial warmup period, use smoothed value
+                // Only show live speed after initial warmup period
                 if (elapsedMs >= MIN_ELAPSED_FOR_LIVE) {
-                  const smoothedMbps = addReadingAndGetSmoothed(rawMbps);
+                  // Use cumulative as running average, clamp spikes to 2x average
+                  const smoothedMbps = addReadingAndGetSmoothed(cumulativeMbps);
+                  lastValidLiveMbps = smoothedMbps;
                   onProgress(smoothedMbps);
                 } else {
-                  // During warmup, don't report or report 0
+                  // During warmup, don't report 0 - show 0 until we have data
                   onProgress(0);
                 }
                 lastProgressTime = now;
+              } else {
+                // No progress event but we have a last valid value - keep showing it
+                if (lastValidLiveMbps > 0) {
+                  onProgress(lastValidLiveMbps);
+                }
               }
 
               await new Promise(r => setTimeout(r, 1));
@@ -373,6 +384,7 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
       const xhrStartTime = performance.now();
       let xhrLastProgressTime = xhrStartTime;
       const xhrRecentReadings: number[] = [];
+      let xhrLastValidLiveMbps = 0;
 
       const externalAbortHandler = () => {
         console.log("[Upload] XHR: External abort");
@@ -399,18 +411,25 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
           if (now - xhrLastProgressTime >= progressIntervalMs) {
             const elapsedMs = now - xhrStartTime;
             const elapsedSec = elapsedMs / 1000;
-            const rawMbps = (xhrTotalBytes * 8) / (elapsedSec * 1_000_000);
+            const cumulativeMbps = (xhrTotalBytes * 8) / (elapsedSec * 1_000_000);
 
             // Smooth with moving average
             if (elapsedMs >= MIN_ELAPSED_FOR_LIVE) {
-              xhrRecentReadings.push(rawMbps);
+              xhrRecentReadings.push(cumulativeMbps);
               if (xhrRecentReadings.length > SMOOTH_WINDOW) xhrRecentReadings.shift();
-              const smoothedMbps = xhrRecentReadings.reduce((a, b) => a + b, 0) / xhrRecentReadings.length;
+              const avg = xhrRecentReadings.reduce((a, b) => a + b, 0) / xhrRecentReadings.length;
+              const smoothedMbps = Math.min(cumulativeMbps, avg * CLAMP_MULTIPLIER);
+              xhrLastValidLiveMbps = smoothedMbps;
               onProgress(smoothedMbps);
             } else {
               onProgress(0);
             }
             xhrLastProgressTime = now;
+          } else {
+            // No progress event but keep showing last valid value
+            if (xhrLastValidLiveMbps > 0) {
+              onProgress(xhrLastValidLiveMbps);
+            }
           }
         }
       });

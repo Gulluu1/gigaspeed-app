@@ -231,7 +231,7 @@ export default function SpeedometerGauge({
         />
 
         {/* Progress arc - only draws the visible sweep from -135° to endAngle */}
-        {arcPath && (
+        {clampedSpeed > 0 && arcPath && (
           <path
             clipPath="url(#arcClip)"
             d={arcPath}
