@@ -1,15 +1,17 @@
 "use client";
 
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback, useState } from "react";
 
 interface SpeedometerGaugeProps {
   speed: number;
   maxSpeed?: number;
   label: string;
   size?: number;
+  isTesting: boolean;
+  onStartTest: () => void;
 }
 
-const MARKINGS = [0, 5, 10, 50, 100, 250, 500, 750, 1000];
+const MARKINGS = [0, 10, 25, 50, 100, 250, 500, 750, 1000];
 const MAJOR_MARKINGS = [0, 100, 250, 500, 750, 1000];
 
 export default function SpeedometerGauge({
@@ -17,17 +19,20 @@ export default function SpeedometerGauge({
   maxSpeed = 1000,
   label,
   size = 360,
+  isTesting,
+  onStartTest,
 }: SpeedometerGaugeProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const needleRef = useRef<SVGPathElement>(null);
+  const [centerScale, setCenterScale] = useState(1);
 
   // Clamp speed to maxSpeed
   const clampedSpeed = Math.min(Math.max(speed, 0), maxSpeed);
 
-  // Convert speed to angle (-90 to +90 degrees, where -90 = 0, 0 = 500, +90 = 1000)
+  // Convert speed to angle (-135 to +135 degrees for full circle, where -135 = 0, 0 = 500, +135 = 1000)
   const speedToAngle = useCallback((value: number): number => {
-    // Map 0-1000 to -90 to +90 degrees
-    return (value / maxSpeed) * 180 - 90;
+    // Map 0-1000 to -135 to +135 degrees
+    return (value / maxSpeed) * 270 - 135;
   }, [maxSpeed]);
 
   // Draw markings on mount and when speed/maxSpeed changes
@@ -36,7 +41,7 @@ export default function SpeedometerGauge({
     if (!svg) return;
 
     const centerX = size / 2;
-    const centerY = size * 0.85;
+    const centerY = size / 2;
     const radius = size * 0.38;
 
     // Clear existing dynamic markings
@@ -105,30 +110,44 @@ export default function SpeedometerGauge({
 
     const angle = speedToAngle(clampedSpeed);
     needle.style.transform = `rotate(${angle}deg)`;
-    needle.style.transformOrigin = "bottom center";
+    needle.style.transformOrigin = "center center";
   }, [clampedSpeed, speedToAngle]);
+
+  // Center button press animation
+  useEffect(() => {
+    if (isTesting) {
+      // Use setTimeout to avoid synchronous setState in effect
+      const timer = setTimeout(() => {
+        setCenterScale(0.95);
+        setTimeout(() => setCenterScale(1), 150);
+      }, 0);
+      return () => clearTimeout(timer);
+    }
+  }, [isTesting]);
 
   return (
     <div className="flex flex-col items-center">
       <div className="relative w-full h-auto">
         <svg
           ref={svgRef}
-          viewBox={`-${size * 0.12} 0 ${size * 1.24} ${size}`}
+          viewBox={`-${size * 0.12} -${size * 0.12} ${size * 1.24} ${size * 1.24}`}
           className="w-full h-auto"
           preserveAspectRatio="xMidYMid meet"
           style={{ maxWidth: `${size}px` }}
         >
           <defs>
-            {/* Gauge background gradient arc - premium multi-stop */}
+            {/* Gauge background gradient arc - premium multi-stop for full circle */}
             <linearGradient id="gaugeArcGradient" x1="0%" y1="0%" x2="100%" y2="0%">
               <stop offset="0%" stopColor="#06b6d4" />
               <stop offset="10%" stopColor="#0ea5e9" />
-              <stop offset="25%" stopColor="#8b5cf6" />
+              <stop offset="20%" stopColor="#3b82f6" />
+              <stop offset="30%" stopColor="#8b5cf6" />
               <stop offset="40%" stopColor="#a855f7" />
-              <stop offset="55%" stopColor="#d946ef" />
-              <stop offset="70%" stopColor="#ec4899" />
-              <stop offset="85%" stopColor="#f97316" />
-              <stop offset="95%" stopColor="#fbbf24" />
+              <stop offset="50%" stopColor="#d946ef" />
+              <stop offset="60%" stopColor="#ec4899" />
+              <stop offset="70%" stopColor="#f97316" />
+              <stop offset="80%" stopColor="#fbbf24" />
+              <stop offset="90%" stopColor="#eab308" />
               <stop offset="100%" stopColor="#22c55e" />
             </linearGradient>
             {/* Background track gradient */}
@@ -153,7 +172,7 @@ export default function SpeedometerGauge({
             </radialGradient>
             {/* Center hub shadow */}
             <filter id="hubShadow" x="-50%" y="-50%" width="200%" height="200%">
-              <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#ca8a04" flood-opacity="0.4"/>
+              <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#ca8a04" flood-opacity="0.4"/>
             </filter>
             {/* Progress arc glow */}
             <filter id="arcGlow" x="-50%" y="-50%" width="200%" height="200%">
@@ -163,27 +182,40 @@ export default function SpeedometerGauge({
                 <feMergeNode in="SourceGraphic"/>
               </feMerge>
             </filter>
+            {/* Button gradient */}
+            <linearGradient id="buttonGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+              <stop offset="0%" stopColor="#7c3aed" />
+              <stop offset="50%" stopColor="#a855f7" />
+              <stop offset="100%" stopColor="#d946ef" />
+            </linearGradient>
+            <linearGradient id="buttonGradientActive" x1="0%" y1="0%" x2="0%" y2="100%">
+              <stop offset="0%" stopColor="#22c55e" />
+              <stop offset="50%" stopColor="#16a34a" />
+              <stop offset="100%" stopColor="#15803d" />
+            </linearGradient>
           </defs>
 
-          {/* Background arc track - subtle */}
-          <path
-            d={`M ${size * 0.08} ${size * 0.85} A ${size * 0.4} ${size * 0.4} 0 0 1 ${size * 0.92} ${size * 0.85}`}
+          {/* Background full circle track */}
+          <circle
+            cx={size / 2}
+            cy={size / 2}
+            r={size * 0.38}
             fill="none"
             stroke="url(#trackGradient)"
             strokeWidth={size * 0.022}
             strokeLinecap="round"
-            opacity="0.5"
+            opacity="0.4"
           />
 
-          {/* Progress arc - premium gradient with glow */}
+          {/* Progress arc - premium gradient with glow (full circle, 270 degrees visible) */}
           <path
-            d={`M ${size * 0.08} ${size * 0.85} A ${size * 0.4} ${size * 0.4} 0 0 1 ${size * 0.92} ${size * 0.85}`}
+            d={`M ${size / 2} ${size * 0.12} A ${size * 0.38} ${size * 0.38} 0 1 1 ${size * 0.88} ${size / 2}`}
             fill="none"
             stroke="url(#gaugeArcGradient)"
             strokeWidth={size * 0.022}
             strokeLinecap="round"
-            strokeDasharray={`${(Math.PI * size * 0.4).toFixed(1)} ${(Math.PI * size * 0.4).toFixed(1)}`}
-            strokeDashoffset={`${(Math.PI * size * 0.4 * (1 - clampedSpeed / maxSpeed)).toFixed(1)}`}
+            strokeDasharray={`${(Math.PI * 1.5 * size * 0.38).toFixed(1)} ${(Math.PI * 0.5 * size * 0.38).toFixed(1)}`}
+            strokeDashoffset={`${(Math.PI * 1.5 * size * 0.38 * (1 - clampedSpeed / maxSpeed)).toFixed(1)}`}
             style={{
               transition: "stroke-dashoffset 200ms cubic-bezier(0.25, 0.46, 0.45, 0.94)",
               filter: "url(#arcGlow)",
@@ -193,28 +225,28 @@ export default function SpeedometerGauge({
           {/* Center hub */}
           <circle
             cx={size / 2}
-            cy={size * 0.85}
-            r={size * 0.055}
+            cy={size / 2}
+            r={size * 0.14}
             fill="url(#hubGradient)"
             filter="url(#hubShadow)"
             stroke="#eab308"
-            strokeWidth={1.5}
+            strokeWidth={2}
           />
 
           {/* Inner hub highlight */}
           <circle
             cx={size / 2}
-            cy={size * 0.85}
-            r={size * 0.03}
+            cy={size / 2}
+            r={size * 0.09}
             fill="#fef9c3"
-            opacity="0.6"
+            opacity="0.5"
           />
 
           {/* Needle */}
-          <g transform={`translate(${size / 2}, ${size * 0.85})`}>
+          <g transform={`translate(${size / 2}, ${size / 2})`}>
             <path
               ref={needleRef}
-              d={`M 0 0 L 0 ${-size * 0.38} L ${size * 0.015} ${-size * 0.4} L ${-size * 0.015} ${-size * 0.4} Z`}
+              d={`M 0 ${-size * 0.02} L 0 ${-size * 0.38} L ${size * 0.018} ${-size * 0.4} L ${-size * 0.018} ${-size * 0.4} Z`}
               fill="url(#needleGradient)"
               stroke="#ca8a04"
               strokeWidth={1.5}
@@ -222,44 +254,89 @@ export default function SpeedometerGauge({
                 transform: `rotate(${speedToAngle(clampedSpeed)}deg)`,
                 transformOrigin: "0 0",
                 transition: "transform 200ms cubic-bezier(0.25, 0.46, 0.45, 0.94)",
-                filter: "drop-shadow(0 2px 6px rgba(202, 138, 4, 0.5))",
+                filter: "drop-shadow(0 2px 8px rgba(202, 138, 4, 0.5))",
               }}
             />
             {/* Needle base cap */}
             <circle
               cx={0}
               cy={0}
-              r={size * 0.02}
+              r={size * 0.025}
               fill="url(#hubGradient)"
               stroke="#ca8a04"
               strokeWidth={2}
             />
           </g>
 
-          {/* Center speed value */}
-          <text
-            x={size / 2}
-            y={size * 0.85 + 14}
-            textAnchor="middle"
-            fontSize={size * 0.13}
-            fontWeight="800"
-            fill="#0f172a"
-            fontFamily="system-ui, -apple-system, sans-serif"
-            dominantBaseline="middle"
-            paintOrder="stroke"
-            stroke="white"
-            strokeWidth="4"
-          >
-            {clampedSpeed.toFixed(1)}
-          </text>
+          {/* Center button / Live speed value */}
+          <g style={{ transform: `scale(${centerScale})`, transformOrigin: `${size / 2}px ${size / 2}px`, transition: "transform 100ms ease-out" }}>
+            <foreignObject
+              x={size * 0.22}
+              y={size * 0.22}
+              width={size * 0.56}
+              height={size * 0.56}
+              pointerEvents="none"
+            >
+              <div style={{
+                width: "100%",
+                height: "100%",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                pointerEvents: "none",
+              }}>
+                {!isTesting ? (
+                  <button
+                    onClick={onStartTest}
+                    style={{
+                      width: `${size * 0.56}px`,
+                      height: `${size * 0.56}px`,
+                      borderRadius: "50%",
+                      border: "none",
+                      background: "linear-gradient(135deg, #7c3aed 0%, #a855f7 50%, #d946ef 100%)",
+                      color: "white",
+                      fontSize: `${size * 0.09}px`,
+                      fontWeight: "800",
+                      fontFamily: "system-ui, -apple-system, sans-serif",
+                      cursor: "pointer",
+                      boxShadow: "0 8px 32px rgba(139, 92, 246, 0.5), inset 0 2px 4px rgba(255,255,255,0.2)",
+                      transition: "all 200ms ease",
+                      textTransform: "uppercase",
+                      letterSpacing: "0.1em",
+                    }}
+                  >
+                    GO
+                  </button>
+                ) : (
+                  <>
+                    <div style={{
+                      fontSize: `${size * 0.14}px`,
+                      fontWeight: "800",
+                      color: "#0f172a",
+                      fontFamily: "system-ui, -apple-system, sans-serif",
+                      textShadow: "0 2px 4px rgba(0,0,0,0.1)",
+                      lineHeight: "1",
+                    }}>
+                      {clampedSpeed.toFixed(1)}
+                    </div>
+                    <div style={{
+                      fontSize: `${size * 0.035}px`,
+                      fontWeight: "600",
+                      color: "#64748b",
+                      fontFamily: "system-ui, -apple-system, sans-serif",
+                      textTransform: "uppercase",
+                      letterSpacing: "0.1em",
+                      marginTop: "4px",
+                    }}>
+                      {label}
+                    </div>
+                  </>
+                )}
+              </div>
+            </foreignObject>
+          </g>
         </svg>
-      </div>
-
-      {/* Label below gauge */}
-      <div className="mt-4 text-center">
-        <p className="text-sm font-medium text-slate-600 dark:text-slate-400 uppercase tracking-wider">
-          {label}
-        </p>
       </div>
     </div>
   );

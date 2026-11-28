@@ -19,7 +19,7 @@ interface TestState {
   ispInfo: string;
 }
 
-const STEP_TIMEOUT = 30000; // 30 seconds per step (download can take longer with chunked approach)
+const STEP_TIMEOUT = 30000; // 30 seconds per step
 
 export default function Home() {
   const [results, setResults] = useState<SpeedResult>({
@@ -175,6 +175,8 @@ export default function Home() {
     });
   };
 
+  const isTesting = testState.step === "ping" || testState.step === "download" || testState.step === "upload";
+
   const getStepLabel = () => {
     switch (testState.step) {
       case "download":
@@ -187,15 +189,6 @@ export default function Home() {
         return "SPEED Mbps";
     }
   };
-
-  const getButtonText = () => {
-    if (testState.step === "ping" || testState.step === "download" || testState.step === "upload") return "Testing...";
-    if (testState.step === "complete") return "Dobara Test Karo";
-    if (testState.step === "error") return "Retry";
-    return "START";
-  };
-
-  const isButtonDisabled = testState.step !== "idle" && testState.step !== "complete" && testState.step !== "error";
 
   return (
     <div className="min-h-screen gigaspeed-bg flex flex-col">
@@ -211,101 +204,39 @@ export default function Home() {
 
       {/* Main Content */}
       <main className="flex-1 flex flex-col items-center justify-start px-4 py-6">
-        <div className="w-full max-w-4xl flex flex-col items-center gap-6">
+        <div className="w-full max-w-4xl flex flex-col items-center gap-8">
 
-          {/* Top Metrics Row */}
-          <div className="w-full grid grid-cols-3 gap-3 sm:gap-4">
-            {/* Ping Card */}
-            <div className={`bg-white/80 dark:bg-gray-900/80 backdrop-blur-sm rounded-2xl p-4 shadow-lg border-2 transition-all duration-300 ${
-              testState.step === "ping" ? "border-amber-400 shadow-amber-500/20" : "border-gray-100 dark:border-gray-800"
+          {/* Speedometer Gauge with Center GO Button */}
+          <SpeedometerGauge
+            speed={gaugeSpeed}
+            maxSpeed={1000}
+            label={getStepLabel()}
+            size={380}
+            isTesting={isTesting}
+            onStartTest={handleStartTest}
+          />
+
+          {/* Server & ISP Status Lines */}
+          <div className="w-full max-w-md text-center space-y-1">
+            <p className={`text-sm font-mono transition-colors duration-300 ${
+              testState.step === "ping" ? "text-violet-600 dark:text-violet-400" : "text-slate-500 dark:text-slate-400"
             }`}>
-              <div className="flex items-center gap-2 mb-2">
-                <div className="w-2.5 h-2.5 rounded-full bg-amber-500" />
-                <span className="text-xs font-medium text-gray-600 dark:text-gray-300 uppercase tracking-wider">
-                  PING
-                </span>
-              </div>
-              <div className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white tabular-nums">
-                {results.ping !== null ? results.ping.toFixed(0) : "—"}
-              </div>
-              <div className="text-xs text-gray-500 dark:text-gray-400">ms</div>
-            </div>
-
-            {/* Download Card */}
-            <div className={`bg-white/80 dark:bg-gray-900/80 backdrop-blur-sm rounded-2xl p-4 shadow-lg border-2 transition-all duration-300 ${
-              testState.step === "download" ? "border-sky-400 shadow-sky-500/20" : "border-gray-100 dark:border-gray-800"
-            }`}>
-              <div className="flex items-center gap-2 mb-2">
-                <div className="w-2.5 h-2.5 rounded-full bg-sky-500" />
-                <span className="text-xs font-medium text-gray-600 dark:text-gray-300 uppercase tracking-wider">
-                  DOWNLOAD
-                </span>
-              </div>
-              <div className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white tabular-nums">
-                {results.download !== null ? results.download.toFixed(1) : "—"}
-              </div>
-              <div className="text-xs text-gray-500 dark:text-gray-400">Mbps</div>
-            </div>
-
-            {/* Upload Card */}
-            <div className={`bg-white/80 dark:bg-gray-900/80 backdrop-blur-sm rounded-2xl p-4 shadow-lg border-2 transition-all duration-300 ${
-              testState.step === "upload" ? "border-emerald-400 shadow-emerald-500/20" : "border-gray-100 dark:border-gray-800"
-            }`}>
-              <div className="flex items-center gap-2 mb-2">
-                <div className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
-                <span className="text-xs font-medium text-gray-600 dark:text-gray-300 uppercase tracking-wider">
-                  UPLOAD
-                </span>
-              </div>
-              <div className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white tabular-nums">
-                {results.upload !== null ? results.upload.toFixed(1) : "—"}
-              </div>
-              <div className="text-xs text-gray-500 dark:text-gray-400">Mbps</div>
-            </div>
-          </div>
-
-          {/* Speedometer Gauge */}
-          <div className="w-full flex flex-col items-center gap-4">
-            <SpeedometerGauge
-              speed={gaugeSpeed}
-              maxSpeed={1000}
-              label={getStepLabel()}
-              size={360}
-            />
-
-            {/* Server Status Line */}
-            <div className="w-full max-w-md text-center">
-              <p className={`text-sm font-mono transition-colors duration-300 ${
-                testState.step === "ping" ? "text-violet-600 dark:text-violet-400" : "text-slate-500 dark:text-slate-400"
-              }`}>
-                {testState.serverStatus}
+              {testState.serverStatus}
+            </p>
+            {testState.ispInfo && (
+              <p className="text-xs font-mono text-slate-400 dark:text-slate-500">
+                {testState.ispInfo}
               </p>
-              {testState.ispInfo && (
-                <p className="text-xs font-mono text-slate-400 dark:text-slate-500 mt-1">
-                  {testState.ispInfo}
-                </p>
-              )}
-            </div>
-
-            {/* START Button */}
-            <button
-              onClick={handleStartTest}
-              disabled={isButtonDisabled}
-              className="gradient-btn text-white px-10 py-4 rounded-full text-lg font-semibold shadow-lg shadow-violet-500/30 hover:shadow-violet-500/50 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:shadow-none focus:outline-none focus:ring-4 focus:ring-violet-500/30 min-w-[220px] w-full sm:w-auto"
-            >
-              {getButtonText()}
-            </button>
-
-            {/* Error Message - inline below button */}
+            )}
             {testState.step === "error" && (
-              <p className="w-full max-w-md text-center text-sm text-red-600 dark:text-red-400 mt-2">
+              <p className="text-sm text-red-600 dark:text-red-400 mt-1">
                 {testState.errorMessage}
               </p>
             )}
           </div>
 
-          {/* Result Cards - Always visible at bottom */}
-          <div className="w-full grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4 mt-4">
+          {/* Result Cards - Download / Upload / Ping */}
+          <div className="w-full grid grid-cols-3 gap-3 sm:gap-4">
             {/* Download Result Card */}
             <div className="bg-white/80 dark:bg-gray-900/80 backdrop-blur-sm rounded-2xl p-4 download-accent shadow-lg shadow-blue-500/10 border border-gray-100 dark:border-gray-800 min-w-0">
               <div className="flex items-center gap-2 mb-2">
@@ -351,7 +282,7 @@ export default function Home() {
 
           {/* Final Result Summary */}
           {testState.step === "complete" && results.download !== null && results.upload !== null && results.ping !== null && (
-            <div className="w-full max-w-4xl mt-6">
+            <div className="w-full max-w-4xl">
               <div className="bg-white/80 dark:bg-gray-900/80 backdrop-blur-sm rounded-2xl p-6 shadow-xl border border-gray-100 dark:border-gray-800">
                 <div className="text-center mb-6">
                   <p className="text-lg font-semibold text-gray-900 dark:text-white mb-3">

@@ -245,8 +245,11 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
 
+      console.log("[Upload] Starting upload to", url, "with", randomData.length, "bytes");
+
       // Handle abort signal
       const abortHandler = () => {
+        console.log("[Upload] Abort signal received");
         xhr.abort();
         reject(new Error("Test cancelled"));
       };
@@ -258,6 +261,7 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
 
       // Our own timeout handling (not xhr.timeout)
       const timeoutId = setTimeout(() => {
+        console.log("[Upload] Timeout reached, aborting");
         xhr.abort();
         // If we have uploaded some data, resolve with partial result
         if (totalBytes > 0) {
@@ -276,6 +280,7 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
       xhr.upload.addEventListener("progress", (event) => {
         if (event.lengthComputable) {
           totalBytes = event.loaded;
+          console.log("[Upload] Progress:", totalBytes, "/", event.total, "bytes");
           const now = performance.now();
           if (now - lastProgressTime >= progressIntervalMs) {
             const elapsedMs = now - startTime;
@@ -288,6 +293,7 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
       });
 
       xhr.addEventListener("load", () => {
+        console.log("[Upload] Load event, status:", xhr.status, "bytes sent:", totalBytes);
         clearTimeout(timeoutId);
         signal?.removeEventListener("abort", abortHandler);
         if (xhr.status >= 200 && xhr.status < 300) {
@@ -297,11 +303,13 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
           onProgress(finalMbps);
           resolve({ mbps: finalMbps, bytes: totalBytes });
         } else {
+          console.error("[Upload] HTTP error:", xhr.status, xhr.statusText);
           reject(new Error(`HTTP error: ${xhr.status}`));
         }
       });
 
       xhr.addEventListener("error", () => {
+        console.error("[Upload] Network error");
         clearTimeout(timeoutId);
         signal?.removeEventListener("abort", abortHandler);
         // If we have some data, return partial result
@@ -317,6 +325,7 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
       });
 
       xhr.addEventListener("abort", () => {
+        console.log("[Upload] Abort event, bytes sent:", totalBytes);
         clearTimeout(timeoutId);
         signal?.removeEventListener("abort", abortHandler);
         // If we have some data, return partial result
@@ -333,6 +342,8 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
 
       xhr.open("POST", url, true);
       // Don't use xhr.timeout - we handle timeout ourselves
+      // Set Content-Type explicitly like curl test
+      xhr.setRequestHeader("Content-Type", "application/octet-stream");
       xhr.send(randomData);
     });
   }
