@@ -50,6 +50,27 @@ export default function SpeedometerGauge({
     return (value / maxSpeed) * 270 - 135;
   }, [maxSpeed]);
 
+  // Calculate arc sweep angle based on speed (0 to 270 degrees)
+  const sweepAngle = (clampedSpeed / maxSpeed) * 270;
+  const endAngle = -135 + sweepAngle; // Start at -135°, sweep clockwise
+
+  // Calculate arc path - only draw the visible sweep portion
+  const startAngleRad = (-135 * Math.PI) / 180;
+  const endAngleRad = (endAngle * Math.PI) / 180;
+
+  const startX = centerX + arcRadius * Math.cos(startAngleRad);
+  const startY = centerY + arcRadius * Math.sin(startAngleRad);
+  const endX = centerX + arcRadius * Math.cos(endAngleRad);
+  const endY = centerY + arcRadius * Math.sin(endAngleRad);
+
+  // Large arc flag: 1 if sweep > 180°, 0 otherwise
+  const largeArcFlag = sweepAngle > 180 ? 1 : 0;
+
+  // Arc path: only draw the visible sweep from -135° to endAngle
+  const arcPath = sweepAngle > 0
+    ? `M ${startX.toFixed(2)} ${startY.toFixed(2)} A ${arcRadius} ${arcRadius} 0 ${largeArcFlag} 1 ${endX.toFixed(2)} ${endY.toFixed(2)}`
+    : "";
+
   // Draw markings on mount and when size/maxSpeed changes
   useEffect(() => {
     const svg = svgRef.current;
@@ -163,7 +184,7 @@ export default function SpeedometerGauge({
             <circle cx={centerX} cy={centerY} r={dialRadius - 4} />
           </clipPath>
 
-          {/* Arc gradient - premium multi-stop */}
+          {/* Arc gradient - premium multi-stop, follows the sweep */}
           <linearGradient id="gaugeArcGradient" x1="0%" y1="0%" x2="100%" y2="0%">
             <stop offset="0%" stopColor="#06b6d4" />
             <stop offset="10%" stopColor="#0ea5e9" />
@@ -209,21 +230,20 @@ export default function SpeedometerGauge({
           opacity="0.35"
         />
 
-        {/* Progress arc - at arcRadius, 270 degrees (-135 to +135) */}
-        {/* Arc starts at -135° (bottom-left), sweeps 270° to +135° (bottom-right) */}
-        <path
-          clipPath="url(#arcClip)"
-          d={`M ${centerX + arcRadius * Math.cos(-135 * Math.PI / 180)} ${centerY + arcRadius * Math.sin(-135 * Math.PI / 180)} A ${arcRadius} ${arcRadius} 0 1 1 ${centerX + arcRadius * Math.cos(135 * Math.PI / 180)} ${centerY + arcRadius * Math.sin(135 * Math.PI / 180)}`}
-          fill="none"
-          stroke="url(#gaugeArcGradient)"
-          strokeWidth={arcStrokeWidth}
-          strokeLinecap="butt"
-          strokeDasharray={`${(Math.PI * 1.5 * arcRadius).toFixed(1)} ${(Math.PI * 0.5 * arcRadius).toFixed(1)}`}
-          strokeDashoffset={`${(Math.PI * 1.5 * arcRadius * (1 - clampedSpeed / maxSpeed)).toFixed(1)}`}
-          style={{
-            transition: "stroke-dashoffset 200ms cubic-bezier(0.25, 0.46, 0.45, 0.94)",
-          }}
-        />
+        {/* Progress arc - only draws the visible sweep from -135° to endAngle */}
+        {arcPath && (
+          <path
+            clipPath="url(#arcClip)"
+            d={arcPath}
+            fill="none"
+            stroke="url(#gaugeArcGradient)"
+            strokeWidth={arcStrokeWidth}
+            strokeLinecap="butt"
+            style={{
+              transition: "stroke-dashoffset 200ms cubic-bezier(0.25, 0.46, 0.45, 0.94)",
+            }}
+          />
+        )}
 
         {/* Needle - thin line from center to arcRadius */}
         <line
@@ -332,7 +352,6 @@ export default function SpeedometerGauge({
           </div>
         )}
       </div>
-
-      </div>
+    </div>
   );
 }

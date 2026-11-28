@@ -223,9 +223,14 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
   const url = "https://speed.cloudflare.com/__up";
   const minDurationMs = 5000; // Minimum 5 seconds for accurate measurement
   const progressIntervalMs = 200; // Report progress every 200ms
-  const dataSize = 10 * 1024 * 1024; // 10 MB buffer
-  const uploadDurationMs = 10000; // Fixed 10 second upload window (reduced from 15s)
+  const dataSize = 20 * 1024 * 1024; // 20 MB buffer (larger to ensure 10s+ upload)
+  const uploadDurationMs = 10000; // Fixed 10 second upload window
   const chunkSize = 65536; // 64 KB - max for crypto.getRandomValues
+
+  // For live speed smoothing - keep recent readings for moving average
+  const recentReadings: number[] = [];
+  const SMOOTH_WINDOW = 5; // Keep last 5 readings for moving average
+  const MIN_ELAPSED_FOR_LIVE = 1500; // Ignore first 1.5s for live display
 
   // Generate random data using crypto.getRandomValues in 64KB chunks
   const randomData = new Uint8Array(dataSize);
@@ -240,6 +245,16 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
   let totalBytes = 0;
   const startTime = performance.now();
   let lastProgressTime = startTime;
+
+  // Calculate smoothed live speed
+  function addReadingAndGetSmoothed(rawMbps: number): number {
+    recentReadings.push(rawMbps);
+    if (recentReadings.length > SMOOTH_WINDOW) {
+      recentReadings.shift();
+    }
+    // Return average of recent readings
+    return recentReadings.reduce((a, b) => a + b, 0) / recentReadings.length;
+  }
 
   // Try fetch with streaming first, fallback to XHR
   async function runUploadWithFetch(): Promise<{ mbps: number; bytes: number }> {
@@ -283,9 +298,18 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
               if (now - lastProgressTime >= progressIntervalMs) {
                 const elapsedMs = now - startTime;
                 const elapsedSec = elapsedMs / 1000;
-                // Smooth: cumulative bytes / elapsed time (ignore first spike)
-                const mbps = (totalBytes * 8) / (elapsedSec * 1_000_000);
-                onProgress(mbps);
+
+                // Calculate raw speed
+                const rawMbps = (totalBytes * 8) / (elapsedSec * 1_000_000);
+
+                // Only show live speed after initial warmup period, use smoothed value
+                if (elapsedMs >= MIN_ELAPSED_FOR_LIVE) {
+                  const smoothedMbps = addReadingAndGetSmoothed(rawMbps);
+                  onProgress(smoothedMbps);
+                } else {
+                  // During warmup, don't report or report 0
+                  onProgress(0);
+                }
                 lastProgressTime = now;
               }
 
@@ -327,7 +351,9 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
 
       const finalElapsedMs = performance.now() - startTime;
       const finalElapsedSec = finalElapsedMs / 1000;
+      // Final speed: total bytes / actual elapsed time
       const finalMbps = (totalBytes * 8) / (finalElapsedSec * 1_000_000);
+      console.log("[Upload] Final:", finalMbps.toFixed(2), "Mbps, bytes:", totalBytes, "elapsed:", finalElapsedSec.toFixed(2), "s");
       onProgress(finalMbps);
 
       return { mbps: finalMbps, bytes: totalBytes };
@@ -346,6 +372,7 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
       let xhrTotalBytes = 0;
       const xhrStartTime = performance.now();
       let xhrLastProgressTime = xhrStartTime;
+      const xhrRecentReadings: number[] = [];
 
       const externalAbortHandler = () => {
         console.log("[Upload] XHR: External abort");
@@ -372,9 +399,17 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
           if (now - xhrLastProgressTime >= progressIntervalMs) {
             const elapsedMs = now - xhrStartTime;
             const elapsedSec = elapsedMs / 1000;
-            // Smooth: cumulative bytes / elapsed time
-            const mbps = (xhrTotalBytes * 8) / (elapsedSec * 1_000_000);
-            onProgress(mbps);
+            const rawMbps = (xhrTotalBytes * 8) / (elapsedSec * 1_000_000);
+
+            // Smooth with moving average
+            if (elapsedMs >= MIN_ELAPSED_FOR_LIVE) {
+              xhrRecentReadings.push(rawMbps);
+              if (xhrRecentReadings.length > SMOOTH_WINDOW) xhrRecentReadings.shift();
+              const smoothedMbps = xhrRecentReadings.reduce((a, b) => a + b, 0) / xhrRecentReadings.length;
+              onProgress(smoothedMbps);
+            } else {
+              onProgress(0);
+            }
             xhrLastProgressTime = now;
           }
         }
@@ -391,7 +426,7 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
         onProgress(finalMbps);
 
         if (xhr.status >= 200 && xhr.status < 300) {
-          console.log("[Upload] XHR completed:", xhr.status);
+          console.log("[Upload] XHR completed:", xhr.status, "final:", finalMbps.toFixed(2), "Mbps");
           resolve({ mbps: finalMbps, bytes: xhrTotalBytes });
         } else {
           console.error("[Upload] XHR HTTP error:", xhr.status);
@@ -500,6 +535,8 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
   while (totalElapsedMs < minDurationMs) {
     if (signal?.aborted) throw new Error("Test cancelled");
     totalBytes = 0; // Reset for next iteration
+    // Clear readings for next run
+    recentReadings.length = 0;
     lastProgressTime = performance.now();
     const additionalResult = await runUploadWithTimeout();
     // Weighted average favoring the latest measurement

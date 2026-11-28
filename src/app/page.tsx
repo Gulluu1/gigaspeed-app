@@ -329,36 +329,7 @@ export default function Home() {
                 </div>
               </div>
 
-              {/* History List */}
-              {history.length > 0 && (
-                <div className="mt-6 w-full max-w-4xl">
-                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
-                    <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Pichle Tests</h3>
-                    <button
-                      onClick={handleClearHistory}
-                      className="text-sm text-red-600 dark:text-red-400 hover:underline self-start sm:self-auto"
-                    >
-                      History saaf karo
-                    </button>
-                  </div>
-                  <div className="bg-white/80 dark:bg-gray-900/80 backdrop-blur-sm rounded-2xl p-4 shadow-lg border border-gray-100 dark:border-gray-800 space-y-2">
-                    {history.map((entry) => (
-                      <div key={entry.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 p-3 bg-gray-50 dark:bg-gray-800/50 rounded-xl">
-                        <div className="flex flex-wrap items-center gap-2 sm:gap-3 text-sm text-gray-700 dark:text-gray-300">
-                          <span className="font-medium text-sky-600 dark:text-sky-400">↓ {entry.download.toFixed(1)} Mbps</span>
-                          <span className="font-medium text-emerald-600 dark:text-emerald-400">↑ {entry.upload.toFixed(1)} Mbps</span>
-                          <span className="font-medium text-amber-600 dark:text-amber-400">{entry.ping.toFixed(0)} ms</span>
-                          <span className="text-gray-500 dark:text-gray-400">{formatTimestamp(entry.timestamp)}</span>
-                        </div>
-                        <span className="text-sm font-medium text-violet-600 dark:text-violet-400">
-                          {getRating(entry.download)}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
+              </div>
           )}
 
           {/* History List - Always visible */}
