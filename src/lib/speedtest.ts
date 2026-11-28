@@ -224,10 +224,17 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
   const minDurationMs = 5000; // Minimum 5 seconds for accurate measurement
   const progressIntervalMs = 200; // Report progress every 200ms
   const dataSize = 5 * 1024 * 1024; // 5 MB
+  const chunkSize = 65536; // 64 KB - max for crypto.getRandomValues
 
-  // Generate random data using crypto.getRandomValues
+  // Generate random data using crypto.getRandomValues in 64KB chunks
   const randomData = new Uint8Array(dataSize);
-  crypto.getRandomValues(randomData);
+  for (let offset = 0; offset < dataSize; offset += chunkSize) {
+    if (signal?.aborted) throw new Error("Test cancelled");
+    const currentChunkSize = Math.min(chunkSize, dataSize - offset);
+    const chunk = new Uint8Array(currentChunkSize);
+    crypto.getRandomValues(chunk);
+    randomData.set(chunk, offset);
+  }
 
   let totalBytes = 0;
   let startTime = performance.now();
