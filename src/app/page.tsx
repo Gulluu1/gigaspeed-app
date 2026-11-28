@@ -16,6 +16,7 @@ interface TestState {
   step: TestStep;
   errorMessage: string;
   serverStatus: string;
+  ispInfo: string;
 }
 
 const STEP_TIMEOUT = 30000; // 30 seconds per step (download can take longer with chunked approach)
@@ -30,6 +31,7 @@ export default function Home() {
     step: "idle",
     errorMessage: "",
     serverStatus: "Server: Cloudflare Speed Test",
+    ispInfo: "",
   });
   const [history, setHistory] = useState<HistoryEntry[]>(() => getHistory());
   const [gaugeSpeed, setGaugeSpeed] = useState(0);
@@ -56,7 +58,7 @@ export default function Home() {
       promise,
       new Promise<T>((_, reject) => {
         const timeout = setTimeout(() => {
-          reject(new Error("Step timeout (15s)"));
+          reject(new Error(`Step timeout (${ms / 1000}s)`));
         }, ms);
         signal.addEventListener("abort", () => clearTimeout(timeout));
       }),
@@ -74,7 +76,27 @@ export default function Home() {
       step: "ping",
       errorMessage: "",
       serverStatus: "Server se connect ho raha hai...",
+      ispInfo: "",
     });
+
+    // Fetch ISP info in background
+    fetch("https://speed.cloudflare.com/meta", { signal })
+      .then((r) => r.json())
+      .then((data) => {
+        if (!signal.aborted) {
+          const isp = data.asOrganization || data.isp || "";
+          const city = data.city || "";
+          const region = data.region || "";
+          const country = data.country || "";
+          if (isp || city || region || country) {
+            const parts = [isp, city, region, country].filter(Boolean);
+            setTestState((prev) => ({ ...prev, ispInfo: parts.join(" • ") }));
+          }
+        }
+      })
+      .catch(() => {
+        // Ignore meta fetch errors
+      });
 
     try {
       // Step 1: Ping (fresh measurement every test)
@@ -135,17 +157,6 @@ export default function Home() {
         errorMessage: message,
       }));
     }
-  };
-
-  const handleRetry = () => {
-    abortCurrentTest();
-    setResults({ download: null, upload: null, ping: null });
-    setGaugeSpeed(0);
-    setTestState({
-      step: "idle",
-      errorMessage: "",
-      serverStatus: "Server: Cloudflare Speed Test",
-    });
   };
 
   const handleClearHistory = () => {
@@ -269,6 +280,11 @@ export default function Home() {
               }`}>
                 {testState.serverStatus}
               </p>
+              {testState.ispInfo && (
+                <p className="text-xs font-mono text-slate-400 dark:text-slate-500 mt-1">
+                  {testState.ispInfo}
+                </p>
+              )}
             </div>
 
             {/* START Button */}
@@ -280,19 +296,11 @@ export default function Home() {
               {getButtonText()}
             </button>
 
-            {/* Error Message */}
+            {/* Error Message - inline below button */}
             {testState.step === "error" && (
-              <div className="w-full max-w-md text-center p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl">
-                <p className="text-red-700 dark:text-red-300 mb-3 text-sm">
-                  {testState.errorMessage}
-                </p>
-                <button
-                  onClick={handleRetry}
-                  className="gradient-btn text-white px-6 py-2 rounded-full font-medium hover:opacity-90 transition-opacity"
-                >
-                  Try again
-                </button>
-              </div>
+              <p className="w-full max-w-md text-center text-sm text-red-600 dark:text-red-400 mt-2">
+                {testState.errorMessage}
+              </p>
             )}
           </div>
 

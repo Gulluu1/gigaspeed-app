@@ -225,6 +225,7 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
   const progressIntervalMs = 200; // Report progress every 200ms
   const dataSize = 5 * 1024 * 1024; // 5 MB
   const chunkSize = 65536; // 64 KB - max for crypto.getRandomValues
+  const uploadTimeoutMs = 30000; // 30 second timeout per upload attempt
 
   // Generate random data using crypto.getRandomValues in 64KB chunks
   const randomData = new Uint8Array(dataSize);
@@ -240,7 +241,7 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
   let startTime = performance.now();
   let lastProgressTime = startTime;
 
-  async function runUpload(): Promise<number> {
+  async function runUpload(): Promise<{ mbps: number; bytes: number }> {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
 
@@ -254,6 +255,23 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
         return;
       }
       signal?.addEventListener("abort", abortHandler);
+
+      // Our own timeout handling (not xhr.timeout)
+      const timeoutId = setTimeout(() => {
+        xhr.abort();
+        // If we have uploaded some data, resolve with partial result
+        if (totalBytes > 0) {
+          const finalElapsedMs = performance.now() - startTime;
+          const finalElapsedSec = finalElapsedMs / 1000;
+          const finalMbps = (totalBytes * 8) / (finalElapsedSec * 1_000_000);
+          onProgress(finalMbps);
+          signal?.removeEventListener("abort", abortHandler);
+          resolve({ mbps: finalMbps, bytes: totalBytes });
+        } else {
+          signal?.removeEventListener("abort", abortHandler);
+          reject(new Error(`Upload timeout (${uploadTimeoutMs / 1000}s)`));
+        }
+      }, uploadTimeoutMs);
 
       xhr.upload.addEventListener("progress", (event) => {
         if (event.lengthComputable) {
@@ -270,41 +288,58 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
       });
 
       xhr.addEventListener("load", () => {
+        clearTimeout(timeoutId);
         signal?.removeEventListener("abort", abortHandler);
         if (xhr.status >= 200 && xhr.status < 300) {
           const finalElapsedMs = performance.now() - startTime;
           const finalElapsedSec = finalElapsedMs / 1000;
           const finalMbps = (totalBytes * 8) / (finalElapsedSec * 1_000_000);
           onProgress(finalMbps);
-          resolve(finalMbps);
+          resolve({ mbps: finalMbps, bytes: totalBytes });
         } else {
           reject(new Error(`HTTP error: ${xhr.status}`));
         }
       });
 
       xhr.addEventListener("error", () => {
+        clearTimeout(timeoutId);
         signal?.removeEventListener("abort", abortHandler);
-        reject(new Error("Internet se connect nahi ho pa raha. Wi-Fi/data check karke dobara try karo."));
+        // If we have some data, return partial result
+        if (totalBytes > 0) {
+          const finalElapsedMs = performance.now() - startTime;
+          const finalElapsedSec = finalElapsedMs / 1000;
+          const finalMbps = (totalBytes * 8) / (finalElapsedSec * 1_000_000);
+          onProgress(finalMbps);
+          resolve({ mbps: finalMbps, bytes: totalBytes });
+        } else {
+          reject(new Error("Internet se connect nahi ho pa raha. Wi-Fi/data check karke dobara try karo."));
+        }
       });
 
       xhr.addEventListener("abort", () => {
+        clearTimeout(timeoutId);
         signal?.removeEventListener("abort", abortHandler);
-        reject(new Error("Test cancelled"));
-      });
-
-      xhr.addEventListener("timeout", () => {
-        signal?.removeEventListener("abort", abortHandler);
-        reject(new Error("Upload timeout"));
+        // If we have some data, return partial result
+        if (totalBytes > 0) {
+          const finalElapsedMs = performance.now() - startTime;
+          const finalElapsedSec = finalElapsedMs / 1000;
+          const finalMbps = (totalBytes * 8) / (finalElapsedSec * 1_000_000);
+          onProgress(finalMbps);
+          resolve({ mbps: finalMbps, bytes: totalBytes });
+        } else {
+          reject(new Error("Test cancelled"));
+        }
       });
 
       xhr.open("POST", url, true);
-      xhr.timeout = 30000; // 30 second timeout
+      // Don't use xhr.timeout - we handle timeout ourselves
       xhr.send(randomData);
     });
   }
 
   // Run upload at least once
-  let finalMbps = await runUpload();
+  const firstResult = await runUpload();
+  let finalMbps = firstResult.mbps;
   const totalElapsedMs = performance.now() - startTime;
 
   // If completed too fast (< 2s), repeat until we reach minimum duration
@@ -313,9 +348,9 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
     totalBytes = 0; // Reset for next iteration
     startTime = performance.now();
     lastProgressTime = startTime;
-    const additionalMbps = await runUpload();
+    const additionalResult = await runUpload();
     // Weighted average favoring the latest measurement
-    finalMbps = (finalMbps + additionalMbps) / 2;
+    finalMbps = (finalMbps + additionalResult.mbps) / 2;
   }
 
   return finalMbps;
