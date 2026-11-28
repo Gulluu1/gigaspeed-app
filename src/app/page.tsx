@@ -151,11 +151,22 @@ export default function Home() {
     } catch (error) {
       if (signal.aborted) return;
       const message = error instanceof Error ? error.message : "Test failed";
-      setTestState((prev) => ({
-        ...prev,
-        step: "error",
-        errorMessage: message,
-      }));
+
+      // If error happens during upload and we have download/ping results,
+      // show specific upload error but keep results and go back to idle
+      if (testState.step === "upload" && results.download !== null && results.ping !== null) {
+        setTestState((prev) => ({
+          ...prev,
+          step: "idle",
+          errorMessage: "Upload measure nahi ho paya, Download aur Ping upar dekh lo",
+        }));
+      } else {
+        setTestState((prev) => ({
+          ...prev,
+          step: "error",
+          errorMessage: message,
+        }));
+      }
     }
   };
 
@@ -228,7 +239,7 @@ export default function Home() {
                 {testState.ispInfo}
               </p>
             )}
-            {testState.step === "error" && (
+            {(testState.step === "error" || (testState.step === "idle" && testState.errorMessage)) && (
               <p className="text-sm text-red-600 dark:text-red-400 mt-1">
                 {testState.errorMessage}
               </p>
