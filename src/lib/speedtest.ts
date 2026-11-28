@@ -223,11 +223,11 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
   const url = "https://speed.cloudflare.com/__up";
   const minDurationMs = 5000; // Minimum 5 seconds for accurate measurement
   const progressIntervalMs = 200; // Report progress every 200ms
-  const dataSize = 5 * 1024 * 1024; // 5 MB
-  const chunkSize = 65536; // 64 KB - max for crypto.getRandomValues
-  const uploadTimeoutMs = 30000; // 30 second timeout per upload attempt
+  const dataSize = 10 * 1024 * 1024; // 10 MB - larger buffer for sustained upload
+  const uploadDurationMs = 15000; // Fixed 15 second upload window
 
   // Generate random data using crypto.getRandomValues in 64KB chunks
+  const chunkSize = 65536; // 64 KB - max for crypto.getRandomValues
   const randomData = new Uint8Array(dataSize);
   for (let offset = 0; offset < dataSize; offset += chunkSize) {
     if (signal?.aborted) throw new Error("Test cancelled");
@@ -238,115 +238,140 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
   }
 
   let totalBytes = 0;
-  let startTime = performance.now();
+  const startTime = performance.now();
   let lastProgressTime = startTime;
 
   async function runUpload(): Promise<{ mbps: number; bytes: number }> {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
+    console.log("[Upload] Starting timed upload to", url, "duration:", uploadDurationMs, "ms");
 
-      console.log("[Upload] Starting upload to", url, "with", randomData.length, "bytes");
+    // Use fetch with stream to get upload progress
+    const controller = new AbortController();
+    const abortSignal = controller.signal;
 
-      // Handle abort signal
-      const abortHandler = () => {
-        console.log("[Upload] Abort signal received");
-        xhr.abort();
-        reject(new Error("Test cancelled"));
-      };
-      if (signal?.aborted) {
-        reject(new Error("Test cancelled"));
-        return;
-      }
-      signal?.addEventListener("abort", abortHandler);
+    // Handle external abort signal
+    const externalAbortHandler = () => {
+      console.log("[Upload] External abort signal received");
+      controller.abort();
+      throw new Error("Test cancelled");
+    };
+    if (signal?.aborted) throw new Error("Test cancelled");
+    signal?.addEventListener("abort", externalAbortHandler);
 
-      // Our own timeout handling (not xhr.timeout)
-      const timeoutId = setTimeout(() => {
-        console.log("[Upload] Timeout reached, aborting");
-        xhr.abort();
-        // If we have uploaded some data, resolve with partial result
-        if (totalBytes > 0) {
-          const finalElapsedMs = performance.now() - startTime;
-          const finalElapsedSec = finalElapsedMs / 1000;
-          const finalMbps = (totalBytes * 8) / (finalElapsedSec * 1_000_000);
-          onProgress(finalMbps);
-          signal?.removeEventListener("abort", abortHandler);
-          resolve({ mbps: finalMbps, bytes: totalBytes });
-        } else {
-          signal?.removeEventListener("abort", abortHandler);
-          reject(new Error(`Upload timeout (${uploadTimeoutMs / 1000}s)`));
-        }
-      }, uploadTimeoutMs);
+    // Auto-abort after fixed duration
+    const durationTimeout = setTimeout(() => {
+      console.log("[Upload] Duration reached, aborting");
+      controller.abort();
+    }, uploadDurationMs);
 
-      xhr.upload.addEventListener("progress", (event) => {
-        if (event.lengthComputable) {
-          totalBytes = event.loaded;
-          console.log("[Upload] Progress:", totalBytes, "/", event.total, "bytes");
-          const now = performance.now();
-          if (now - lastProgressTime >= progressIntervalMs) {
-            const elapsedMs = now - startTime;
-            const elapsedSec = elapsedMs / 1000;
-            const mbps = (totalBytes * 8) / (elapsedSec * 1_000_000);
-            onProgress(mbps);
-            lastProgressTime = now;
+    // Create a readable stream that feeds data and tracks progress
+    const uploadStream = new ReadableStream({
+      async start(controller) {
+        let sentBytes = 0;
+        const streamChunkSize = 65536; // 64KB chunks
+        let offset = 0;
+
+        const sendChunk = async () => {
+          while (offset < dataSize && !abortSignal.aborted) {
+            const currentChunkSize = Math.min(streamChunkSize, dataSize - offset);
+            const chunk = randomData.slice(offset, offset + currentChunkSize);
+
+            try {
+              controller.enqueue(chunk);
+              sentBytes += currentChunkSize;
+              totalBytes = sentBytes;
+              offset += currentChunkSize;
+
+              // Report progress
+              const now = performance.now();
+              if (now - lastProgressTime >= progressIntervalMs) {
+                const elapsedMs = now - startTime;
+                const elapsedSec = elapsedMs / 1000;
+                const mbps = (totalBytes * 8) / (elapsedSec * 1_000_000);
+                onProgress(mbps);
+                lastProgressTime = now;
+              }
+
+              // Small delay to not overwhelm
+              await new Promise(r => setTimeout(r, 1));
+            } catch (e) {
+              if (abortSignal.aborted) break;
+              throw e;
+            }
           }
-        }
-      });
+          if (!abortSignal.aborted) {
+            controller.close();
+          }
+        };
 
-      xhr.addEventListener("load", () => {
-        console.log("[Upload] Load event, status:", xhr.status, "bytes sent:", totalBytes);
-        clearTimeout(timeoutId);
-        signal?.removeEventListener("abort", abortHandler);
-        if (xhr.status >= 200 && xhr.status < 300) {
-          const finalElapsedMs = performance.now() - startTime;
-          const finalElapsedSec = finalElapsedMs / 1000;
-          const finalMbps = (totalBytes * 8) / (finalElapsedSec * 1_000_000);
-          onProgress(finalMbps);
-          resolve({ mbps: finalMbps, bytes: totalBytes });
-        } else {
-          console.error("[Upload] HTTP error:", xhr.status, xhr.statusText);
-          reject(new Error(`HTTP error: ${xhr.status}`));
-        }
-      });
-
-      xhr.addEventListener("error", () => {
-        console.error("[Upload] Network error");
-        clearTimeout(timeoutId);
-        signal?.removeEventListener("abort", abortHandler);
-        // If we have some data, return partial result
-        if (totalBytes > 0) {
-          const finalElapsedMs = performance.now() - startTime;
-          const finalElapsedSec = finalElapsedMs / 1000;
-          const finalMbps = (totalBytes * 8) / (finalElapsedSec * 1_000_000);
-          onProgress(finalMbps);
-          resolve({ mbps: finalMbps, bytes: totalBytes });
-        } else {
-          reject(new Error("Internet se connect nahi ho pa raha. Wi-Fi/data check karke dobara try karo."));
-        }
-      });
-
-      xhr.addEventListener("abort", () => {
-        console.log("[Upload] Abort event, bytes sent:", totalBytes);
-        clearTimeout(timeoutId);
-        signal?.removeEventListener("abort", abortHandler);
-        // If we have some data, return partial result
-        if (totalBytes > 0) {
-          const finalElapsedMs = performance.now() - startTime;
-          const finalElapsedSec = finalElapsedMs / 1000;
-          const finalMbps = (totalBytes * 8) / (finalElapsedSec * 1_000_000);
-          onProgress(finalMbps);
-          resolve({ mbps: finalMbps, bytes: totalBytes });
-        } else {
-          reject(new Error("Test cancelled"));
-        }
-      });
-
-      xhr.open("POST", url, true);
-      // Don't use xhr.timeout - we handle timeout ourselves
-      // Set Content-Type explicitly like curl test
-      xhr.setRequestHeader("Content-Type", "application/octet-stream");
-      xhr.send(randomData);
+        await sendChunk();
+      }
     });
-  }
+
+    // Start the upload
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (fetch as any)(url, {
+        method: "POST",
+        body: uploadStream,
+        signal: abortSignal,
+        headers: {
+          "Content-Type": "application/octet-stream",
+        },
+        duplex: "half", // Required for streaming upload
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+
+      clearTimeout(durationTimeout);
+      signal?.removeEventListener("abort", externalAbortHandler);
+      console.log("[Upload] Fetch response:", response.status);
+
+      if (!response.ok) {
+        throw new Error(`HTTP error: ${response.status}`);
+      }
+
+      // Upload completed successfully
+      const finalElapsedMs = performance.now() - startTime;
+      const finalElapsedSec = finalElapsedMs / 1000;
+      const finalMbps = (totalBytes * 8) / (finalElapsedSec * 1_000_000);
+      onProgress(finalMbps);
+
+      return { mbps: finalMbps, bytes: totalBytes };
+    } catch (error: unknown) {
+      clearTimeout(durationTimeout);
+      signal?.removeEventListener("abort", externalAbortHandler);
+
+      if (abortSignal.aborted) {
+        // Timeout or external abort - check if we have data
+        if (totalBytes > 0) {
+          const finalElapsedMs = performance.now() - startTime;
+          const finalElapsedSec = finalElapsedMs / 1000;
+          const finalMbps = (totalBytes * 8) / (finalElapsedSec * 1_000_000);
+          onProgress(finalMbps);
+          console.log("[Upload] Partial result on timeout/abort:", finalMbps.toFixed(2), "Mbps");
+          return { mbps: finalMbps, bytes: totalBytes };
+        } else {
+          console.error("[Upload] No data sent, timeout/error");
+          throw new Error("Upload timeout - no data transferred");
+        }
+      } else if (error instanceof DOMException && error.name === "AbortError") {
+        if (totalBytes > 0) {
+          const finalElapsedMs = performance.now() - startTime;
+          const finalElapsedSec = finalElapsedMs / 1000;
+          const finalMbps = (totalBytes * 8) / (finalElapsedSec * 1_000_000);
+          onProgress(finalMbps);
+          return { mbps: finalMbps, bytes: totalBytes };
+        } else {
+          throw new Error("Test cancelled");
+        }
+      } else if (error instanceof TypeError && error.message.includes("fetch")) {
+        console.error("[Upload] Network error:", error);
+        throw new Error("Internet se connect nahi ho pa raha. Wi-Fi/data check karke dobara try karo.");
+      } else {
+        console.error("[Upload] Error:", error);
+        throw error;
+      }
+    }
+  };
 
   // Run upload at least once
   const firstResult = await runUpload();
@@ -357,8 +382,7 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
   while (totalElapsedMs < minDurationMs) {
     if (signal?.aborted) throw new Error("Test cancelled");
     totalBytes = 0; // Reset for next iteration
-    startTime = performance.now();
-    lastProgressTime = startTime;
+    lastProgressTime = performance.now();
     const additionalResult = await runUpload();
     // Weighted average favoring the latest measurement
     finalMbps = (finalMbps + additionalResult.mbps) / 2;
