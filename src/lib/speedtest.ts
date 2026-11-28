@@ -1,6 +1,7 @@
 export interface PingResult {
   ping: number;
   jitter: number;
+  failed?: boolean; // true if all retries failed
 }
 
 export interface HistoryEntry {
@@ -45,12 +46,6 @@ export function getRating(downloadMbps: number): string {
   if (downloadMbps >= 100) return "Bahut tez";
   if (downloadMbps >= 25) return "Achhi";
   return "Slow";
-}
-
-export interface PingResult {
-  ping: number;
-  jitter: number;
-  failed?: boolean; // true if all retries failed
 }
 
 export async function measurePing(signal?: AbortSignal): Promise<PingResult> {
@@ -265,22 +260,10 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
   const url = "https://speed.cloudflare.com/__up";
   const minDurationMs = 5000; // Minimum 5 seconds for accurate measurement
   const progressIntervalMs = 200; // Report progress every 200ms
-  const dataSize = 20 * 1024 * 1024; // 20 MB buffer (larger to ensure 10s+ upload)
   const uploadDurationMs = 10000; // Fixed 10 second upload window
-  const chunkSize = 65536; // 64 KB - max for crypto.getRandomValues
 
   const EMA_ALPHA = 0.2; // EMA alpha for smoothing
   const CLAMP_MULTIPLIER = 1.5; // Live value max 1.5x running average
-
-  // Generate random data using crypto.getRandomValues in 64KB chunks
-  const randomData = new Uint8Array(dataSize);
-  for (let offset = 0; offset < dataSize; offset += chunkSize) {
-    if (signal?.aborted) throw new Error("Test cancelled");
-    const currentChunkSize = Math.min(chunkSize, dataSize - offset);
-    const chunk = new Uint8Array(currentChunkSize);
-    crypto.getRandomValues(chunk);
-    randomData.set(chunk, offset);
-  }
 
   const startTime = performance.now();
 
@@ -343,12 +326,12 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
         signal?.removeEventListener("abort", externalAbortHandler);
 
         const finalElapsedMs = performance.now() - xhrStartTime;
-        const finalElapsedSec = finalElapsedMs / 1000;
+        const finalElapsedSec = Math.min(finalElapsedMs, uploadDurationMs) / 1000;
         const finalMbps = (xhrTotalBytes * 8) / (finalElapsedSec * 1_000_000);
         onProgress(finalMbps);
 
         if (xhr.status >= 200 && xhr.status < 300) {
-          console.log("[Upload] XHR completed:", xhr.status, "final:", finalMbps.toFixed(2), "Mbps");
+          console.log("[Upload] XHR completed:", xhr.status, "final:", finalMbps.toFixed(2), "Mbps, bytes:", xhrTotalBytes, "elapsed:", finalElapsedSec.toFixed(2), "s");
           resolve({ mbps: finalMbps, bytes: xhrTotalBytes });
         } else {
           console.error("[Upload] XHR HTTP error:", xhr.status);
@@ -366,7 +349,7 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
         console.error("[Upload] XHR Network error");
         if (xhrTotalBytes > 0) {
           const finalElapsedMs = performance.now() - xhrStartTime;
-          const finalElapsedSec = finalElapsedMs / 1000;
+          const finalElapsedSec = Math.min(finalElapsedMs, uploadDurationMs) / 1000;
           const finalMbps = (xhrTotalBytes * 8) / (finalElapsedSec * 1_000_000);
           onProgress(finalMbps);
           resolve({ mbps: finalMbps, bytes: xhrTotalBytes });
@@ -380,7 +363,7 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
         signal?.removeEventListener("abort", externalAbortHandler);
         if (xhrTotalBytes > 0) {
           const finalElapsedMs = performance.now() - xhrStartTime;
-          const finalElapsedSec = finalElapsedMs / 1000;
+          const finalElapsedSec = Math.min(finalElapsedMs, uploadDurationMs) / 1000;
           const finalMbps = (xhrTotalBytes * 8) / (finalElapsedSec * 1_000_000);
           onProgress(finalMbps);
           resolve({ mbps: finalMbps, bytes: xhrTotalBytes });
@@ -394,7 +377,7 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
         signal?.removeEventListener("abort", externalAbortHandler);
         if (xhrTotalBytes > 0) {
           const finalElapsedMs = performance.now() - xhrStartTime;
-          const finalElapsedSec = finalElapsedMs / 1000;
+          const finalElapsedSec = Math.min(finalElapsedMs, uploadDurationMs) / 1000;
           const finalMbps = (xhrTotalBytes * 8) / (finalElapsedSec * 1_000_000);
           onProgress(finalMbps);
           resolve({ mbps: finalMbps, bytes: xhrTotalBytes });
@@ -406,6 +389,14 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
       xhr.open("POST", url, true);
       xhr.timeout = uploadDurationMs;
       xhr.setRequestHeader("Content-Type", "application/octet-stream");
+      // Use pre-generated random data as a single large buffer
+      // XHR will send it progressively and report progress events
+      const randomData = new Uint8Array(200 * 1024 * 1024); // 200 MB
+      for (let offset = 0; offset < 200 * 1024 * 1024; offset += 65536) {
+        if (signal?.aborted) throw new Error("Test cancelled");
+        const chunk = new Uint8Array(65536);
+        crypto.getRandomValues(chunk);
+      }
       xhr.send(randomData);
     });
   }
@@ -422,18 +413,18 @@ export async function measureUpload(onProgress: (mbps: number) => void, signal?:
     return result;
   }
 
-      // Run upload at least once
-      const firstResult = await runUploadWithTimeout();
-      let finalMbps = firstResult.mbps;
-      const totalElapsedMs = performance.now() - startTime;
+  // Run upload at least once
+  const firstResult = await runUploadWithTimeout();
+  let finalMbps = firstResult.mbps;
+  const totalElapsedMs = performance.now() - startTime;
 
-      // If completed too fast (< 2s), repeat until we reach minimum duration
-      while (totalElapsedMs < minDurationMs) {
-        if (signal?.aborted) throw new Error("Test cancelled");
-        const additionalResult = await runUploadWithTimeout();
-        // Weighted average favoring the latest measurement
-        finalMbps = (finalMbps + additionalResult.mbps) / 2;
-      }
+  // If completed too fast (< 2s), repeat until we reach minimum duration
+  while (totalElapsedMs < minDurationMs) {
+    if (signal?.aborted) throw new Error("Test cancelled");
+    const additionalResult = await runUploadWithTimeout();
+    // Weighted average favoring the latest measurement
+    finalMbps = (finalMbps + additionalResult.mbps) / 2;
+  }
 
-      return finalMbps;
+  return finalMbps;
 }

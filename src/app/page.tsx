@@ -153,6 +153,7 @@ export default function Home() {
       });
       setHistory(newHistory);
 
+      setGaugeSpeed(downloadMbps);
       setTestState((prev) => ({ ...prev, step: "complete" }));
     } catch (error) {
       if (signal.aborted) return;
@@ -166,12 +167,14 @@ export default function Home() {
           step: "idle",
           errorMessage: "Upload measure nahi ho paya, Download aur Ping upar dekh lo",
         }));
+        setGaugeSpeed(0);
       } else {
         setTestState((prev) => ({
           ...prev,
           step: "error",
           errorMessage: message,
         }));
+        setGaugeSpeed(0);
       }
     }
   };
